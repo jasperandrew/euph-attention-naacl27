@@ -26,8 +26,8 @@ model/*.bin
 model/*.pt
 model/*.pth
 
-# Datasets (original dataset)
-datasets/EN-euphs-2025.csv
+# Datasets (raw and processed CSVs may contain sensitive/licensed data)
+datasets/*.csv
 
 # Generated plots (reproducible from scripts)
 plots/
