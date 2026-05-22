@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Model weights and tokenizer artifacts (large binary files)
+model/*.safetensors
+model/*.bin
+model/*.pt
+model/*.pth
+
+# Datasets (original dataset)
+datasets/EN-euphs-2025.csv
+
+# Generated plots (reproducible from scripts)
+plots/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+.claude
+ipynb/
