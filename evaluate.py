@@ -7,14 +7,6 @@ Usage:
 """
 import argparse
 
-import torch
-from torch.utils.data import DataLoader
-from transformers import AutoModelForSequenceClassification
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-
-from src import config
-from src.data_utils import load_splits, EuphemismDataset
-
 
 def load_model(model_dir):
     model = AutoModelForSequenceClassification.from_pretrained(model_dir)
@@ -69,4 +61,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Classifier accuracy/F1 on the eval split")
     parser.add_argument('--batch-size', type=int, default=16)
     args = parser.parse_args()
+
+    import torch
+    from torch.utils.data import DataLoader
+    from transformers import AutoModelForSequenceClassification
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+    from src import config
+    from src.data_utils import load_splits, EuphemismDataset
+
     main(args)

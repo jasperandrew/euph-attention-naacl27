@@ -15,15 +15,6 @@ Usage:
 """
 import argparse
 
-import numpy as np
-import scipy.stats
-import torch
-from transformers import AutoModelForSequenceClassification
-
-from src import config
-from src.data_utils import load_splits
-from src.profiler.analysis import profile_dataframe
-
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
             'Internal (PET → PET)', 'Entropy', 'Sink Fraction', 'Attn Distance']
@@ -223,9 +214,20 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Per-(metric, layer, head) significance tests and base-vs-finetuned effect-size comparisons on the eval split."
+    )
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--skip-base', action='store_true',
                         help='Skip base-model passes (sections 1–3 only).')
     args = parser.parse_args()
+
+    import numpy as np
+    import scipy.stats
+    import torch
+    from transformers import AutoModelForSequenceClassification
+    from src import config
+    from src.data_utils import load_splits
+    from src.profiler.analysis import profile_dataframe
+
     main(args)

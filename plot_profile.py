@@ -14,14 +14,6 @@ Usage:
 import argparse
 import os
 
-import torch
-from transformers import AutoModelForSequenceClassification
-
-from src import config
-from src.data_utils import load_splits
-from src.profiler.analysis import profile_dataframe
-from src.profiler.plots import plot_aggregate_profiles, plot_finetuning_diff_profile, plot_layer11_lollipop
-
 
 _METRIC_COLS = [
     'Inward (Context → PET)',
@@ -106,4 +98,12 @@ if __name__ == '__main__':
     parser.add_argument('--skip-base', action='store_true',
                         help="Skip the base-model pass and the ft−base diff plot.")
     args = parser.parse_args()
+
+    import torch
+    from transformers import AutoModelForSequenceClassification
+    from src import config
+    from src.data_utils import load_splits
+    from src.profiler.analysis import profile_dataframe
+    from src.profiler.plots import plot_aggregate_profiles, plot_finetuning_diff_profile, plot_layer11_lollipop
+
     main(args)

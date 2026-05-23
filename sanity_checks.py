@@ -21,17 +21,6 @@ Usage:
 """
 import argparse
 
-import numpy as np
-import pandas as pd
-import scipy.stats
-import sklearn.linear_model
-import torch
-from transformers import AutoModelForSequenceClassification
-
-from src import config
-from src.attention_utils import get_model_output, get_attn_head_weights, _find_unbounded_pet
-from src.data_utils import TOKENIZER, load_splits, tokenize, get_tokens
-
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
             'Internal (PET → PET)', 'Entropy', 'Sink Fraction', 'Attn Distance']
 
@@ -337,9 +326,22 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Five sanity checks for the layer-11 reconfiguration claim: permutation control, length confound, random-span baseline, misclassification stratification, and PET-mask lexical control."
+    )
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--n-perms', type=int, default=20)
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
+
+    import numpy as np
+    import pandas as pd
+    import scipy.stats
+    import sklearn.linear_model
+    import torch
+    from transformers import AutoModelForSequenceClassification
+    from src import config
+    from src.attention_utils import get_model_output, get_attn_head_weights, _find_unbounded_pet
+    from src.data_utils import TOKENIZER, load_splits, tokenize, get_tokens
+
     main(args)

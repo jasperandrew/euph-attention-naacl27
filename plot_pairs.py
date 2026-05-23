@@ -9,23 +9,8 @@ Usage:
   python plot_pairs.py --compare-base
   python plot_pairs.py --compare-base --single-head-plots --finetune-head-plots
 """
-import os
 import argparse
-
-import torch
-from transformers import AutoModelForSequenceClassification
-
-from src import config
-from src.data_utils import tokenize, get_tokens
-from src.attention_utils import get_attn_weights
-from src.pair.plots import (
-    plot_euph_attention_analysis,
-    plot_finetune_attn_diff,
-    plot_avg_diff,
-    plot_entropy_by_layer,
-    plot_entropy_diff_heatmap,
-    plot_all_sink_diffs,
-)
+import os
 
 
 def load_model(model_dir, output_attentions=True):
@@ -162,4 +147,19 @@ if __name__ == '__main__':
         args.compare_base = True
         args.single_head_plots = True
         args.finetune_head_plots = True
+
+    import torch
+    from transformers import AutoModelForSequenceClassification
+    from src import config
+    from src.data_utils import tokenize, get_tokens
+    from src.attention_utils import get_attn_weights
+    from src.pair.plots import (
+        plot_euph_attention_analysis,
+        plot_finetune_attn_diff,
+        plot_avg_diff,
+        plot_entropy_by_layer,
+        plot_entropy_diff_heatmap,
+        plot_all_sink_diffs,
+    )
+
     main(args)
