@@ -1,4 +1,4 @@
-# Title Here
+# Positional PETs: Localizing the Attention Mechanism of Euphemism Detection
 Jasper Andrew (andrewj2@montclair.edu), Anna Feldman (feldmana@montclair.edu), Jing Peng (pengj@montclair.edu)
 
 ## Replication Instructions
