@@ -7,10 +7,10 @@ from . import config
 sns.set(font_scale=0.8)
 
 
-def _save_or_show(fig, output_dir, filename):
+def _save_or_show(fig, output_dir, filename, dpi=150):
     if output_dir and filename:
         os.makedirs(output_dir, exist_ok=True)
-        fig.savefig(os.path.join(output_dir, filename), bbox_inches='tight')
+        fig.savefig(os.path.join(output_dir, filename), bbox_inches='tight', dpi=dpi)
         plt.close(fig)
     else:
         plt.show()

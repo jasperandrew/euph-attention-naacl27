@@ -267,6 +267,49 @@ def plot_layer11_lollipop(df, output_dir=None):
     _save_or_show(fig, output_dir, 'layer11_per_head_d_lollipop.png')
 
 
+def plot_correct_vs_misclassified(df, output_dir=None):
+    """Grouped bar chart of Cohen's d at layer 11, split by classification correctness.
+
+    Requires df to have a 'Predicted' column (produced when the profiler is run
+    with predictions). Shows how the layer-11 effect sizes collapse and sign-flip
+    for misclassified samples relative to correctly classified ones.
+    """
+    if 'Predicted' not in df.columns:
+        raise ValueError("DataFrame must contain a 'Predicted' column.")
+
+    l11 = df[df['Layer'] == 11].copy()
+    l11['correct'] = l11['Condition'] == l11['Predicted']
+    correct = l11[l11['correct']]
+    wrong = l11[~l11['correct']]
+
+    d_correct, d_wrong = [], []
+    for m in _PROFILE_METRICS:
+        e_c = correct[correct['Condition'] == 'Euphemistic'][m].values
+        n_c = correct[correct['Condition'] == 'Non-Euphemistic'][m].values
+        e_w = wrong[wrong['Condition'] == 'Euphemistic'][m].values
+        n_w = wrong[wrong['Condition'] == 'Non-Euphemistic'][m].values
+        d_correct.append(_cohens_d(e_c, n_c))
+        d_wrong.append(_cohens_d(e_w, n_w) if len(e_w) > 1 and len(n_w) > 1 else 0.0)
+
+    x = np.arange(len(_PROFILE_METRIC_LABELS))
+    width = 0.32
+    cor_color, mis_color = '#2471a3', '#c0392b'
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.2))
+    ax.bar(x - width / 2, d_correct, width, label='Correct', color=cor_color, alpha=0.85)
+    ax.bar(x + width / 2, d_wrong, width, label='Misclassified', color=mis_color, alpha=0.85)
+    ax.axhline(0, color='black', linewidth=0.8, linestyle='--', alpha=0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(_PROFILE_METRIC_LABELS, fontsize=7, rotation=30, ha='right')
+    ax.set_ylabel("Cohen's $d$", fontsize=8)
+    ax.tick_params(axis='y', labelsize=7)
+    ax.legend(frameon=False, fontsize=7)
+    ax.grid(axis='y', alpha=0.3)
+    ax.set_axisbelow(True)
+    plt.tight_layout()
+    _save_or_show(fig, output_dir, 'layer11_correct_vs_misclassified.png', dpi=300)
+
+
 def plot_aggregate_profiles(agg_df, output_dir=None, unfrozen_only=False):
     """Plots attention metrics by layer and by head, split by ground truth and prediction.
 
