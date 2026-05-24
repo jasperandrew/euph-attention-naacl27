@@ -21,8 +21,8 @@ def profile_single_sample(model, text, pet_phrase, sink_tokens=('<s>', '</s>')):
       Outward (PET → Context) : mean attention PET pays to other tokens
       Internal (PET → PET)    : mean self-attention within PET
       Entropy                 : mean outward entropy (dispersion of PET rows)
-      Sink Fraction           : fraction of PET attention going to <s>/</s>
-      Attn Distance           : expected token distance PET attends over
+      Sink (PET → Sink)       : fraction of PET attention going to <s>/</s>
+      Distance           : expected token distance PET attends over
       Head Variance           : variance across heads (layer-level, duplicated per row)
 
     predicted_label is 'Euphemistic' or 'Non-Euphemistic'.
@@ -74,8 +74,8 @@ def profile_single_sample(model, text, pet_phrase, sink_tokens=('<s>', '</s>')):
                 'Outward (PET → Context)': outward,
                 'Internal (PET → PET)': internal,
                 'Entropy': entropy,
-                'Sink Fraction': sink,
-                'Attn Distance': distance,
+                'Sink (PET → Sink)': sink,
+                'Distance': distance,
             })
 
         head_variance = np.var(np.array(layer_pet_dists), axis=0).mean()

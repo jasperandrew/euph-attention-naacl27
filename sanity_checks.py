@@ -1,4 +1,4 @@
-"""Five sanity checks for the layer-11 reconfiguration claim.
+"""Six sanity checks for the layer-11 reconfiguration claim.
 
 Each eval sample is profiled three ways in a single pass (real PET span, random
 non-overlapping span of equal length, and PET tokens replaced with <mask>), then:
@@ -13,6 +13,9 @@ non-overlapping span of equal length, and PET tokens replaced with <mask>), then
   5. PET-mask (lexical PET-specificity) — PET tokens replaced with <mask>,
      model re-run, metrics computed at the (former) PET span. Tests whether the
      configuration depends on PET *content*.
+  6. Finetuned − base difference test — base model profiled on the same eval
+     set; row-wise subtraction isolates finetuning-induced changes. Confirms
+     how many layer-11 metrics are significant in the difference test.
 
 Usage:
   python sanity_checks.py
@@ -22,7 +25,7 @@ Usage:
 import argparse
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
-            'Internal (PET → PET)', 'Entropy', 'Sink Fraction', 'Attn Distance']
+            'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance']
 
 
 def load_model(model_dir):
@@ -87,14 +90,19 @@ def metrics_for_span(attn_weights, seq_len, span_start, span_end, sink_indices):
     return pd.DataFrame(records)
 
 
-def profile_pass(model, eval_df, rng, max_samples=None):
-    """Iterate eval_df, profile each sample three ways (real PET, random span, masked PET).
+def profile_pass(model, eval_df, rng, max_samples=None, real_only=False):
+    """Iterate eval_df, profile each sample up to three ways in a single forward pass.
 
-    Returns (real_df, rand_df, mask_df, length_df, n_pred_flipped, n_total) where the
-    DataFrames have matching sample_id ordering (sample_id = row_idx // 144 in
-    real/rand/mask; sample_id = row_idx in length_df). Samples are skipped when PET
-    is not found OR no valid random span exists. The masked pass runs the model
-    a second time on inputs where PET tokens have been replaced with <mask>.
+    Real PET and masked PET are run for every sample where the PET is found.
+    Random span is only run when a non-overlapping span of equal length exists;
+    samples without a valid random span are included in real/mask but not rand.
+
+    If real_only=True, only the real PET pass is run (used for the base model).
+
+    Returns (real_df, rand_df, mask_df, length_df, n_pred_flipped, n_total) where
+    n_total counts samples included in real/mask (PET found), and rand_df covers
+    the subset that also had a valid random span. When real_only=True, rand_df and
+    mask_df are empty DataFrames.
     """
     if max_samples:
         eval_df = eval_df.head(max_samples)
@@ -111,37 +119,43 @@ def profile_pass(model, eval_df, rng, max_samples=None):
         if ps is None:
             continue
         seq_len = len(tokens)
-        rs, re_ = random_non_overlapping_span(seq_len, ps, pe, rng)
-        if rs is None:
-            continue
         sink_idx = [i for i, t in enumerate(tokens) if t in ('<s>', '</s>')]
 
         attn, predicted = get_model_output(model, tokenized)
         df_real = metrics_for_span(attn, seq_len, ps, pe, sink_idx)
-        df_rand = metrics_for_span(attn, seq_len, rs, re_, sink_idx)
-
-        masked = {'input_ids': tokenized['input_ids'].clone(),
-                  'attention_mask': tokenized['attention_mask']}
-        masked['input_ids'][0, ps:pe] = mask_id
-        attn_mask, pred_mask = get_model_output(model, masked)
-        df_mask = metrics_for_span(attn_mask, seq_len, ps, pe, sink_idx)
-
-        for d in (df_real, df_rand, df_mask):
-            d['Condition'] = cond
+        df_real['Condition'] = cond
+        df_real['Sample'] = pet
         df_real['Predicted'] = predicted
-        df_rand['Predicted'] = predicted
-        df_mask['Predicted'] = pred_mask
         real_dfs.append(df_real)
-        rand_dfs.append(df_rand)
-        mask_dfs.append(df_mask)
-        if predicted != pred_mask:
-            n_pred_flipped += 1
         lengths.append({'pet_len': pe - ps, 'seq_len': seq_len, 'Condition': cond,
-                        'pred_real': predicted, 'pred_mask': pred_mask})
+                        'pred_real': predicted, 'pred_mask': None})
 
+        if not real_only:
+            masked = {'input_ids': tokenized['input_ids'].clone(),
+                      'attention_mask': tokenized['attention_mask']}
+            masked['input_ids'][0, ps:pe] = mask_id
+            attn_mask, pred_mask = get_model_output(model, masked)
+            df_mask = metrics_for_span(attn_mask, seq_len, ps, pe, sink_idx)
+            df_mask['Condition'] = cond
+            df_mask['Sample'] = pet
+            df_mask['Predicted'] = pred_mask
+            mask_dfs.append(df_mask)
+            lengths[-1]['pred_mask'] = pred_mask
+            if predicted != pred_mask:
+                n_pred_flipped += 1
+
+            rs, re_ = random_non_overlapping_span(seq_len, ps, pe, rng)
+            if rs is not None:
+                df_rand = metrics_for_span(attn, seq_len, rs, re_, sink_idx)
+                df_rand['Condition'] = cond
+                df_rand['Sample'] = pet
+                df_rand['Predicted'] = predicted
+                rand_dfs.append(df_rand)
+
+    empty = pd.DataFrame(columns=real_dfs[0].columns if real_dfs else _METRICS)
     return (pd.concat(real_dfs, ignore_index=True),
-            pd.concat(rand_dfs, ignore_index=True),
-            pd.concat(mask_dfs, ignore_index=True),
+            pd.concat(rand_dfs, ignore_index=True) if rand_dfs else empty,
+            pd.concat(mask_dfs, ignore_index=True) if mask_dfs else empty,
             pd.DataFrame(lengths),
             n_pred_flipped,
             len(lengths))
@@ -188,7 +202,16 @@ def check_permutation(per_sample, n_perms, seed):
     print(f"    mean={np.mean(n_sigs):.2f}, max={max(n_sigs)}, all={n_sigs}")
     print(f"  Layer-11 significant per shuffle (out of {len(_METRICS)}):")
     print(f"    mean={np.mean(n_l11_sigs):.2f}, max={max(n_l11_sigs)}, all={n_l11_sigs}")
-    print(f"  Real (unshuffled): 5/6 layer-11 metrics significant.")
+    l11_real = per_sample[per_sample['Layer'] == 11]
+    n_real_sig = sum(
+        scipy.stats.mannwhitneyu(
+            l11_real[l11_real['Condition'] == 'Euphemistic'][m].values,
+            l11_real[l11_real['Condition'] == 'Non-Euphemistic'][m].values,
+            alternative='two-sided',
+        )[1] * n_tests < 0.05
+        for m in _METRICS
+    )
+    print(f"  Real (unshuffled): {n_real_sig}/{len(_METRICS)} layer-11 metrics significant.")
 
 
 def check_length(per_sample, lengths):
@@ -301,28 +324,83 @@ def check_pet_mask(real_ps, mask_ps, n_pred_flipped, n_total):
         print(f"  {m:>26} {d_real:>+9.3f} {d_mask:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
 
 
+def check_diff_test(real_df, base_df):
+    print("\n" + "=" * 78)
+    print(" Check 6 — Finetuned − base difference test at layer 11")
+    print("=" * 78)
+    n_tests = len(_METRICS) * config.NUM_LAYERS
+    thresh = 0.05 / n_tests
+    print(f"  Bonferroni threshold p < {thresh:.2e}\n")
+
+    diff_df = real_df.copy().reset_index(drop=True)
+    base_reset = base_df.reset_index(drop=True)
+    for m in _METRICS:
+        diff_df[m] = real_df[m].values - base_reset[m].values
+    diff_ps = to_per_sample(diff_df)
+
+    print(f"  {'Metric':>26} {'d_ft':>9} {'d_base':>9} {'d_diff':>9} {'p_diff (raw)':>14} {'p_diff (bonf)':>14} {'sig':>4}")
+    real_ps = to_per_sample(real_df)
+    base_ps = to_per_sample(base_df)
+    n_sig = 0
+    for m in _METRICS:
+        rl = real_ps[real_ps['Layer'] == 11]
+        bl = base_ps[base_ps['Layer'] == 11]
+        dl = diff_ps[diff_ps['Layer'] == 11]
+        d_ft   = cohens_d(rl[rl['Condition'] == 'Euphemistic'][m].values,
+                           rl[rl['Condition'] == 'Non-Euphemistic'][m].values)
+        d_base = cohens_d(bl[bl['Condition'] == 'Euphemistic'][m].values,
+                           bl[bl['Condition'] == 'Non-Euphemistic'][m].values)
+        e_d = dl[dl['Condition'] == 'Euphemistic'][m].values
+        n_d = dl[dl['Condition'] == 'Non-Euphemistic'][m].values
+        d_diff = cohens_d(e_d, n_d)
+        _, p = scipy.stats.mannwhitneyu(e_d, n_d, alternative='two-sided')
+        p_b = min(p * n_tests, 1.0)
+        sig = '***' if p_b < 0.001 else '**' if p_b < 0.01 else '*' if p_b < 0.05 else ''
+        if p_b < 0.05:
+            n_sig += 1
+        print(f"  {m:>26} {d_ft:>+9.3f} {d_base:>+9.3f} {d_diff:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
+    print(f"\n  {n_sig}/{len(_METRICS)} layer-11 metrics significant in the difference test.")
+
+
 def main(args):
     print("Loading finetuned model...")
-    model = load_model(config.MODEL_DIR)
+    ft_model = load_model(config.MODEL_DIR)
     _, eval_df = load_splits()
     print(f"Eval split: {len(eval_df)} samples")
 
     rng = np.random.default_rng(args.seed)
     print("Profiling (real PET + random span + masked PET in single pass)...")
     real_df, rand_df, mask_df, lengths, n_flipped, n_total = profile_pass(
-        model, eval_df, rng, max_samples=args.max_samples)
+        ft_model, eval_df, rng, max_samples=args.max_samples)
     n_samples = len(real_df) // (config.NUM_LAYERS * config.NUM_HEADS)
     print(f"  {n_samples} samples kept (after PET / random-span availability)")
+    del ft_model
+    torch.cuda.empty_cache()
 
     real_ps = to_per_sample(real_df)
     rand_ps = to_per_sample(rand_df)
     mask_ps = to_per_sample(mask_df)
+
+    if args.max_samples is None:
+        data_dir = os.path.join(config.PLOTS_DIR, 'data')
+        os.makedirs(data_dir, exist_ok=True)
+        mask_df.to_parquet(os.path.join(data_dir, 'mask_df.parquet'), index=False)
+        print(f"  Cached mask_df to {data_dir}/mask_df.parquet")
 
     check_permutation(real_ps, args.n_perms, args.seed)
     check_length(real_ps, lengths)
     check_random_span(real_ps, rand_ps)
     check_misclassified(real_ps)
     check_pet_mask(real_ps, mask_ps, n_flipped, n_total)
+
+    print("\nLoading base model for difference test...")
+    base_model = load_model(config.MODEL_NAME)
+    print("Profiling base model (real PET only)...")
+    base_df, _, _, _, _, _ = profile_pass(
+        base_model, eval_df, rng, max_samples=args.max_samples, real_only=True)
+    del base_model
+    torch.cuda.empty_cache()
+    check_diff_test(real_df, base_df)
 
 
 if __name__ == '__main__':
@@ -334,6 +412,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
 
+    import os
     import numpy as np
     import pandas as pd
     import scipy.stats

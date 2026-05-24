@@ -307,7 +307,7 @@ def plot_all_sink_diffs(model, samples, output_dir=None):
         summary.append({'PET': label, 'Mean Sink Diff': scalar_diff})
         print(f"  Mean sink diff (Euph - Non-Euph): {scalar_diff:+.4f}")
 
-        pivot = diff.pivot(index='Layer', columns='Head', values='Sink Fraction')
+        pivot = diff.pivot(index='Layer', columns='Head', values='Sink (PET → Sink)')
         max_abs = pivot.abs().max().max()
         sns.heatmap(pivot, cmap='RdBu_r', center=0, vmin=-max_abs, vmax=max_abs,
                     ax=ax, cbar_kws={'label': 'Sink Diff'}, square=False)

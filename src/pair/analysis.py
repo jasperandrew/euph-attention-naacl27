@@ -29,5 +29,5 @@ def compute_sink_diff_for_sample(model, sample):
         return None
 
     diff = df_y.copy()
-    diff['Sink Fraction'] = df_y['Sink Fraction'].values - df_n['Sink Fraction'].values
-    return diff, diff['Sink Fraction'].mean()
+    diff['Sink (PET → Sink)'] = df_y['Sink (PET → Sink)'].values - df_n['Sink (PET → Sink)'].values
+    return diff, diff['Sink (PET → Sink)'].mean()

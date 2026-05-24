@@ -20,12 +20,12 @@ import os
 
 
 _METRIC_COLS = [
-    'Inward (Context → PET)',
     'Outward (PET → Context)',
     'Internal (PET → PET)',
+    'Sink (PET → Sink)',
+    'Inward (Context → PET)',
     'Entropy',
-    'Sink Fraction',
-    'Attn Distance',
+    'Distance',
     'Head Variance',
 ]
 
@@ -105,6 +105,10 @@ def main(args):
     if 'Predicted' in ft_df.columns:
         plot_correct_vs_misclassified(ft_df, output_dir=profile_dir)
 
+    mask_df = _load_cache('mask_df') if use_cache else None
+    if mask_df is not None and 'Sample' in mask_df.columns:
+        plot_real_vs_masked(ft_df, mask_df, output_dir=profile_dir)
+
     if not args.skip_base:
         base_df = _load_cache('base_df') if use_cache else None
         if base_df is None:
@@ -145,6 +149,6 @@ if __name__ == '__main__':
     from src import config
     from src.data_utils import load_splits
     from src.profiler.analysis import profile_dataframe
-    from src.profiler.plots import plot_aggregate_profiles, plot_finetuning_diff_profile, plot_layer11_lollipop, plot_correct_vs_misclassified
+    from src.profiler.plots import plot_aggregate_profiles, plot_finetuning_diff_profile, plot_layer11_lollipop, plot_correct_vs_misclassified, plot_real_vs_masked
 
     main(args)

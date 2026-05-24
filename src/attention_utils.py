@@ -229,7 +229,7 @@ def pet_sink_attention(attn_weights, tokens, pet_tokens, sink_tokens=('<s>', '</
             records.append({
                 'Layer': layer_i + 1,
                 'Head': head_i + 1,
-                'Sink Fraction': float(sink_attn),
+                'Sink (PET → Sink)': float(sink_attn),
             })
 
     return pd.DataFrame(records)

@@ -17,15 +17,15 @@ from ..plot_utils import _save_or_show
 _LINE_PALETTE = 'Set2'
 
 _PROFILE_METRICS = [
-    'Inward (Context → PET)',
     'Outward (PET → Context)',
     'Internal (PET → PET)',
+    'Sink (PET → Sink)',
+    'Inward (Context → PET)',
     'Entropy',
-    'Sink Fraction',
-    'Attn Distance',
+    'Distance',
 ]
 
-_PROFILE_METRIC_LABELS = ['Inward', 'Outward', 'Internal', 'Entropy', 'Sink Frac.', 'Attn Dist.']
+_PROFILE_METRIC_LABELS = ['Outward', 'Internal', 'Sink', 'Inward', 'Entropy', 'Distance']
 
 # Heads that are polyfunctional-and-leading at layer 11 (H3, H7, H11)
 _POLY_HEADS = {3, 7, 11}
@@ -64,7 +64,7 @@ def _layer_range_label(agg_df):
 def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, title_prefix='Aggregate Attention Profile', zero_line=False):
     layers = sorted(agg_df['Layer'].unique())
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8), sharex=True)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 5), sharex=True)
     fig.suptitle(f"{title_prefix} ({title_suffix})", fontsize=16)
     axes_flat = axes.flatten()
 
@@ -101,7 +101,7 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
 
 def _plot_profile_by_head(agg_df, hue_col, title_suffix, file_suffix, output_dir):
     """6-panel line plot of each metric by head, split by hue_col."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(15, 5))
     fig.suptitle(f"Attention Profile by Head — {_layer_range_label(agg_df)} ({title_suffix})", fontsize=16)
     axes = axes.flatten()
 
@@ -123,7 +123,7 @@ def _diff_pivot(df_pos, df_neg, metric):
 
 def _plot_metric_diff_grid(diffs, title, filename, output_dir):
     """6-panel Head×Layer heatmap grid from a list of (metric_name, pivot_df) pairs."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(15, 5))
     fig.suptitle(title, fontsize=14)
     axes = axes.flatten()
 
@@ -234,7 +234,7 @@ def plot_layer11_lollipop(df, output_dir=None):
             p_grid[i, j] = min(p * n_tests, 1.0)
 
     pos_color, neg_color = '#c0392b', '#2471a3'
-    fig, axes = plt.subplots(2, 3, figsize=(12, 6.5), sharex=True)
+    fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
     fig.suptitle("Per-head Cohen's $d$ at layer 11 (finetuned model)", fontsize=14)
     axes = axes.flatten()
 
@@ -308,6 +308,43 @@ def plot_correct_vs_misclassified(df, output_dir=None):
     ax.set_axisbelow(True)
     plt.tight_layout()
     _save_or_show(fig, output_dir, 'layer11_correct_vs_misclassified.png', dpi=300)
+
+
+def plot_real_vs_masked(ft_df, mask_df, output_dir=None):
+    """Grouped bar chart of Cohen's d at layer 11: real PET vs masked PET.
+
+    Shows which metrics survive PET-token masking (position-driven) vs collapse
+    (content-driven). Both DataFrames must have a 'Sample' column for per-sample collapse.
+    """
+    def _per_sample_d(df):
+        ps = df[df['Layer'] == 11].groupby(['Sample', 'Condition'])[_PROFILE_METRICS].mean().reset_index()
+        ds = []
+        for m in _PROFILE_METRICS:
+            e = ps[ps['Condition'] == 'Euphemistic'][m].values
+            n = ps[ps['Condition'] == 'Non-Euphemistic'][m].values
+            ds.append(_cohens_d(e, n))
+        return ds
+
+    d_real = _per_sample_d(ft_df)
+    d_mask = _per_sample_d(mask_df)
+
+    x = np.arange(len(_PROFILE_METRIC_LABELS))
+    width = 0.32
+    real_color, mask_color = '#2471a3', '#e67e22'
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.2))
+    ax.bar(x - width / 2, d_real, width, label='Real PET', color=real_color, alpha=0.85)
+    ax.bar(x + width / 2, d_mask, width, label='Masked PET', color=mask_color, alpha=0.85)
+    ax.axhline(0, color='black', linewidth=0.8, linestyle='--', alpha=0.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(_PROFILE_METRIC_LABELS, fontsize=7, rotation=30, ha='right')
+    ax.set_ylabel("Cohen's $d$", fontsize=8)
+    ax.tick_params(axis='y', labelsize=7)
+    ax.legend(frameon=False, fontsize=7)
+    ax.grid(axis='y', alpha=0.3)
+    ax.set_axisbelow(True)
+    plt.tight_layout()
+    _save_or_show(fig, output_dir, 'layer11_real_vs_masked.png', dpi=300)
 
 
 def plot_aggregate_profiles(agg_df, output_dir=None, unfrozen_only=False):
