@@ -64,15 +64,15 @@ def _layer_range_label(agg_df):
 def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, title_prefix='Aggregate Attention Profile', zero_line=False):
     layers = sorted(agg_df['Layer'].unique())
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 5), sharex=True)
-    fig.suptitle(f"{title_prefix} ({title_suffix})", fontsize=16)
+    fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
+    fig.suptitle(f"{title_prefix} ({title_suffix})", fontsize=14)
     axes_flat = axes.flatten()
 
     for i, metric in enumerate(_PROFILE_METRICS):
         ax = axes_flat[i]
         sns.lineplot(data=agg_df, x='Layer', y=metric, hue=hue_col, ax=ax,
                      marker='o', palette=_LINE_PALETTE, legend=(i == 0))
-        ax.set_title(metric)
+        ax.set_title(metric, fontsize=11)
         ax.set_xticks(layers)
         ax.set_xlabel('Layer' if i >= 3 else '')
         ax.set_ylabel('')
@@ -101,13 +101,13 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
 
 def _plot_profile_by_head(agg_df, hue_col, title_suffix, file_suffix, output_dir):
     """6-panel line plot of each metric by head, split by hue_col."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 5))
-    fig.suptitle(f"Attention Profile by Head — {_layer_range_label(agg_df)} ({title_suffix})", fontsize=16)
+    fig, axes = plt.subplots(2, 3, figsize=(12, 5))
+    fig.suptitle(f"Attention Profile by Head — {_layer_range_label(agg_df)} ({title_suffix})", fontsize=14)
     axes = axes.flatten()
 
     for i, metric in enumerate(_PROFILE_METRICS):
         sns.lineplot(data=agg_df, x='Head', y=metric, hue=hue_col, ax=axes[i], marker='o', palette=_LINE_PALETTE)
-        axes[i].set_title(metric)
+        axes[i].set_title(metric, fontsize=11)
         axes[i].set_xticks(range(1, config.NUM_HEADS + 1))
 
     plt.tight_layout()
@@ -192,6 +192,50 @@ def _plot_label_vs_prediction(agg_df, target_class, output_dir):
     combined = pd.concat([df_label, df_pred], ignore_index=True)
     slug = target_class.lower().replace('-', '').replace(' ', '_')
     _plot_profile_by(combined, 'Source', f'{target_class}: Ground Truth vs Predicted', f'label_vs_pred_{slug}', output_dir)
+
+
+def plot_base_vs_finetuned(ft_df, base_df, output_dir=None, unfrozen_only=False):
+    """6-panel line chart overlaying base and finetuned raw profiles by condition.
+
+    Color encodes ground-truth class; line style encodes model (solid=finetuned,
+    dashed=base). Shaded bands are 95% bootstrapped CIs from seaborn.
+    """
+    ft = ft_df.copy()
+    ft['Model'] = 'Finetuned'
+    base = base_df.copy()
+    base['Model'] = 'Base'
+    combined = pd.concat([ft, base], ignore_index=True)
+    if unfrozen_only:
+        combined = combined[combined['Layer'] > config.FROZEN_LAYERS]
+
+    layers = sorted(combined['Layer'].unique())
+
+    fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
+    fig.suptitle("Absolute Attention Profiles: Base vs. Finetuned (by Ground Truth)", fontsize=14)
+    axes_flat = axes.flatten()
+
+    for i, metric in enumerate(_PROFILE_METRICS):
+        ax = axes_flat[i]
+        sns.lineplot(
+            data=combined, x='Layer', y=metric,
+            hue='Condition', style='Model',
+            hue_order=['Euphemistic', 'Non-Euphemistic'],
+            style_order=['Finetuned', 'Base'],
+            palette=_LINE_PALETTE,
+            ax=ax, legend=(i == 0),
+        )
+        ax.set_title(_PROFILE_METRIC_LABELS[i], fontsize=11)
+        ax.set_xticks(layers)
+        ax.set_xlabel('Layer' if i >= 3 else '')
+        ax.set_ylabel('')
+
+    handles, labels = axes_flat[0].get_legend_handles_labels()
+    axes_flat[0].get_legend().remove()
+    fig.legend(handles=handles, labels=labels, loc='upper center',
+               bbox_to_anchor=(0.5, 0.93), ncol=len(handles),
+               frameon=False)
+    plt.tight_layout(rect=[0, 0, 1, 0.91])
+    _save_or_show(fig, output_dir, 'aggregate_profile_base_vs_ft_by_label.png')
 
 
 def plot_finetuning_diff_profile(diff_df, output_dir=None, unfrozen_only=False):

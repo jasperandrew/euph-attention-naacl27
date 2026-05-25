@@ -128,6 +128,7 @@ def main(args):
         for col in _METRIC_COLS:
             diff_df[col] = ft_df[col].values - base_df[col].values
         plot_finetuning_diff_profile(diff_df, output_dir=profile_dir, unfrozen_only=unfrozen_only)
+        plot_base_vs_finetuned(ft_df, base_df, output_dir=profile_dir, unfrozen_only=unfrozen_only)
 
     print(f"Plots saved to {profile_dir}/")
 
@@ -149,6 +150,6 @@ if __name__ == '__main__':
     from src import config
     from src.data_utils import load_splits
     from src.profiler.analysis import profile_dataframe
-    from src.profiler.plots import plot_aggregate_profiles, plot_finetuning_diff_profile, plot_layer11_lollipop, plot_correct_vs_misclassified, plot_real_vs_masked
+    from src.profiler.plots import plot_aggregate_profiles, plot_finetuning_diff_profile, plot_base_vs_finetuned, plot_layer11_lollipop, plot_correct_vs_misclassified, plot_real_vs_masked
 
     main(args)
