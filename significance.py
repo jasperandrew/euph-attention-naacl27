@@ -17,7 +17,7 @@ import argparse
 
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
-            'Internal (PET → PET)', 'Entropy', 'Sink Fraction', 'Attn Distance']
+            'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance']
 
 
 def load_model(model_id_or_dir):
