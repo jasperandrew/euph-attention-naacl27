@@ -65,7 +65,6 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
     layers = sorted(agg_df['Layer'].unique())
 
     fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
-    fig.suptitle(f"{title_prefix} ({title_suffix})", fontsize=14)
     axes_flat = axes.flatten()
 
     for i, metric in enumerate(_PROFILE_METRICS):
@@ -82,10 +81,10 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
     handles, labels = axes_flat[0].get_legend_handles_labels()
     axes_flat[0].get_legend().remove()
     fig.legend(handles=handles, labels=labels, loc='upper center',
-               bbox_to_anchor=(0.5, 0.93), ncol=len(handles),
-               frameon=False, title=hue_col)
+               bbox_to_anchor=(0.5, 0.97), ncol=len(handles),
+               frameon=False)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.91])
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
     _save_or_show(fig, output_dir, f'aggregate_profile_{file_suffix}.png')
 
     # Head variance is a layer-level metric duplicated across heads; drop duplicates
@@ -211,7 +210,6 @@ def plot_base_vs_finetuned(ft_df, base_df, output_dir=None, unfrozen_only=False)
     layers = sorted(combined['Layer'].unique())
 
     fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
-    fig.suptitle("Absolute Attention Profiles: Base vs. Finetuned (by Ground Truth)", fontsize=14)
     axes_flat = axes.flatten()
 
     for i, metric in enumerate(_PROFILE_METRICS):
@@ -232,9 +230,9 @@ def plot_base_vs_finetuned(ft_df, base_df, output_dir=None, unfrozen_only=False)
     handles, labels = axes_flat[0].get_legend_handles_labels()
     axes_flat[0].get_legend().remove()
     fig.legend(handles=handles, labels=labels, loc='upper center',
-               bbox_to_anchor=(0.5, 0.93), ncol=len(handles),
+               bbox_to_anchor=(0.5, 0.97), ncol=len(handles),
                frameon=False)
-    plt.tight_layout(rect=[0, 0, 1, 0.91])
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
     _save_or_show(fig, output_dir, 'aggregate_profile_base_vs_ft_by_label.png')
 
 
@@ -279,7 +277,6 @@ def plot_layer11_lollipop(df, output_dir=None):
 
     pos_color, neg_color = '#c0392b', '#2471a3'
     fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
-    fig.suptitle("Per-head Cohen's $d$ at layer 11 (finetuned model)", fontsize=14)
     axes = axes.flatten()
 
     for ax, (i, m_label) in zip(axes, enumerate(_PROFILE_METRIC_LABELS)):
@@ -307,7 +304,7 @@ def plot_layer11_lollipop(df, output_dir=None):
 
     for ax in axes[3:]:
         ax.set_xlabel("Cohen's $d$")
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.tight_layout()
     _save_or_show(fig, output_dir, 'layer11_per_head_d_lollipop.png')
 
 
