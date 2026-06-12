@@ -25,8 +25,8 @@ def get_tokens(tokenized_input):
 
 def load_splits():
     """Load pre-saved train/eval splits from the model directory, or re-split from CSV."""
-    train_path = os.path.join(config.MODEL_DIR, 'train_split.csv')
-    eval_path = os.path.join(config.MODEL_DIR, 'eval_split.csv')
+    train_path = os.path.join(config.MODEL_DIR, 'split_train.csv')
+    eval_path = os.path.join(config.MODEL_DIR, 'split_eval.csv')
     if os.path.exists(train_path) and os.path.exists(eval_path):
         print("Loading saved train/eval splits from model directory.")
         return pd.read_csv(train_path), pd.read_csv(eval_path)
