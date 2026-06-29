@@ -8,6 +8,17 @@ from transformers import AutoTokenizer
 
 from . import config
 
+if not os.path.isfile(os.path.join(config.MODEL_DIR, 'config.json')):
+    _model_root = os.path.join(config.BASE_DIR, 'model')
+    _available = sorted(
+        d for d in os.listdir(_model_root)
+        if os.path.isfile(os.path.join(_model_root, d, 'config.json'))
+    )
+    raise FileNotFoundError(
+        f"No finetuned model for language '{config.LANG}' at {config.MODEL_DIR}. "
+        f"Available: {_available}"
+    )
+
 TOKENIZER = AutoTokenizer.from_pretrained(config.MODEL_DIR)
 if config.BOUNDED:
     TOKENIZER.add_special_tokens({'additional_special_tokens': [config.BOUND_TOKEN]})

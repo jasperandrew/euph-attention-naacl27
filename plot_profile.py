@@ -10,6 +10,7 @@ runs. Use --no-cache to force re-running inference.
 
 Usage:
   python plot_profile.py
+  python plot_profile.py --lang sp
   python plot_profile.py --layers unfrozen
   python plot_profile.py --skip-base       # finetuned only, no diff plot
   python plot_profile.py --max-samples 50  # quick test (skips cache)
@@ -17,6 +18,8 @@ Usage:
 """
 import argparse
 import os
+
+from src.cli import add_lang_arg, init_lang
 
 
 _METRIC_COLS = [
@@ -143,7 +146,9 @@ if __name__ == '__main__':
                         help="Skip the base-model pass and the ft−base diff plot.")
     parser.add_argument('--no-cache', action='store_true',
                         help="Force re-running inference and overwrite cached parquet files.")
+    add_lang_arg(parser)
     args = parser.parse_args()
+    init_lang(args)
 
     import torch
     from transformers import AutoModelForSequenceClassification

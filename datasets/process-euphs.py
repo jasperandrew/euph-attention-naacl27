@@ -39,7 +39,7 @@ LANGS = {
 }
 
 BOUND = "[PET_BOUNDARY]"
-PAIR_RE = re.compile(r"\[PET_BOUNDARY\](.*?)\[PET_BOUNDARY\]")
+BOUND_RE = re.compile(re.escape(BOUND))
 SPLIT_RE = re.compile(r"(\w*)\[PET_BOUNDARY\](.*?)\[PET_BOUNDARY\](\w*)")
 
 # pet_instance may be morphologically inflected relative to the base pet
@@ -67,7 +67,7 @@ def select_pair(text, pet, row_id, report):
     candidate PET — e.g. with 4 markers the true PET may sit between the
     middle two. Keep the candidate most similar to the base pet and strip
     all other markers."""
-    positions = [m.start() for m in re.finditer(re.escape(BOUND), text)]
+    positions = [m.start() for m in BOUND_RE.finditer(text)]
     if len(positions) < 2:
         report["no_pair"].append(row_id)
         return None
@@ -77,21 +77,16 @@ def select_pair(text, pet, row_id, report):
     spans = [text[a + len(BOUND):b] for a, b in zip(positions, positions[1:])]
     scores = [similarity(pet, s) for s in spans]
     best = max(range(len(spans)), key=scores.__getitem__)
-    keep = {positions[best], positions[best + 1]}
 
     key = "odd_count" if len(positions) % 2 else "multi_pair"
     report[key].append((
         row_id, len(positions), spans[best], scores[best],
         sorted({s for i, s in enumerate(spans) if i != best}),
     ))
-    parts, prev = [], 0
-    for pos in positions:
-        parts.append(text[prev:pos])
-        if pos in keep:
-            parts.append(BOUND)
-        prev = pos + len(BOUND)
-    parts.append(text[prev:])
-    return "".join(parts)
+    a, b = positions[best], positions[best + 1]
+    return (text[:a].replace(BOUND, "")
+            + text[a:b + len(BOUND)]
+            + text[b + len(BOUND):].replace(BOUND, ""))
 
 
 def _respace(match):
@@ -104,9 +99,9 @@ def process_row(row, split_mode, report):
     if text is None:
         return pd.Series({"pet_instance": "", "text_bounded": str(row["text"])})
 
-    match = SPLIT_RE.search(text) if split_mode else None
-    if match and (match.group(1) or match.group(3)):
-        prefix, inner, suffix = match.group(1), match.group(2), match.group(3)
+    prefix, inner, suffix = SPLIT_RE.search(text).groups()
+    instance = inner
+    if split_mode and (prefix or suffix):
         if prefix:
             report["split"].append((row["id"], f"[{prefix}/]{inner}"))
         if suffix:
@@ -115,10 +110,7 @@ def process_row(row, split_mode, report):
             instance = prefix + inner + suffix
             text = SPLIT_RE.sub(r"[PET_BOUNDARY]\1\2\3[PET_BOUNDARY]", text)
         else:  # "space"
-            instance = inner
             text = SPLIT_RE.sub(_respace, text)
-    else:
-        instance = PAIR_RE.search(text).group(1)
 
     sim = similarity(row["pet"], instance)
     if sim < SIM_WARN:
@@ -161,9 +153,8 @@ def process_language(lang):
         df = df[~df["id"].isin(cfg["bad_ids"])]
 
     report = {"no_pair": [], "odd_count": [], "multi_pair": [], "split": [], "low_sim": []}
-    df = df.rename(columns={"text": "text_bounded"})
     df[["pet_instance", "text_bounded"]] = df.apply(
-        lambda row: process_row({**row, "text": row["text_bounded"]}, cfg["split_mode"], report), axis=1
+        lambda row: process_row(row, cfg["split_mode"], report), axis=1
     )
     df["text_raw"] = df["text_bounded"].str.replace(BOUND, "", regex=False)
 

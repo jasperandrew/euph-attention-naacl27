@@ -12,6 +12,8 @@ Usage:
 import argparse
 import os
 
+from src.cli import add_lang_arg, init_lang
+
 
 def load_model(model_dir, output_attentions=True):
     model = AutoModelForSequenceClassification.from_pretrained(
@@ -142,7 +144,9 @@ if __name__ == '__main__':
                         help="Save per-head attention plots for all non-frozen layers")
     parser.add_argument('--finetune-head-plots', action='store_true',
                         help="Save per-head base-vs-finetuned diff plots (requires --compare-base)")
+    add_lang_arg(parser)
     args = parser.parse_args()
+    init_lang(args)
     if args.all:
         args.compare_base = True
         args.single_head_plots = True
@@ -151,6 +155,12 @@ if __name__ == '__main__':
     import torch
     from transformers import AutoModelForSequenceClassification
     from src import config
+
+    if config.LANG not in config.PAIR_EXAMPLES:
+        raise SystemExit(
+            f"plot_pairs.py needs hand-picked example sentences; add a '{config.LANG}' "
+            f"entry to PAIR_EXAMPLES in src/config.py."
+        )
     from src.data_utils import tokenize, get_tokens
     from src.attention_utils import get_attn_weights
     from src.pair.plots import (

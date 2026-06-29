@@ -10,10 +10,13 @@ Profiles the finetuned and base XLM-R models on the eval split once each, then r
 
 Usage:
   python significance.py
+  python significance.py --lang sp
   python significance.py --max-samples 100
   python significance.py --skip-base   # sections 1–3 only
 """
 import argparse
+
+from src.cli import add_lang_arg, init_lang
 
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
@@ -220,7 +223,9 @@ if __name__ == '__main__':
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--skip-base', action='store_true',
                         help='Skip base-model passes (sections 1–3 only).')
+    add_lang_arg(parser)
     args = parser.parse_args()
+    init_lang(args)
 
     import numpy as np
     import scipy.stats

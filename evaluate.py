@@ -3,9 +3,12 @@ Report classifier accuracy and F1 on the eval split.
 
 Usage:
   python evaluate.py
+  python evaluate.py --lang sp
   python evaluate.py --batch-size 32
 """
 import argparse
+
+from src.cli import add_lang_arg, init_lang
 
 
 def load_model(model_dir):
@@ -59,8 +62,10 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Classifier accuracy/F1 on the eval split")
+    add_lang_arg(parser)
     parser.add_argument('--batch-size', type=int, default=16)
     args = parser.parse_args()
+    init_lang(args)
 
     import torch
     from torch.utils.data import DataLoader

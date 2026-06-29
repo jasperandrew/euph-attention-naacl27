@@ -19,10 +19,14 @@ non-overlapping span of equal length, and PET tokens replaced with <mask>), then
 
 Usage:
   python sanity_checks.py
+  python sanity_checks.py --lang sp
   python sanity_checks.py --max-samples 50
   python sanity_checks.py --n-perms 20 --seed 0
 """
 import argparse
+import os
+
+from src.cli import add_lang_arg, init_lang
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
             'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance']
@@ -410,9 +414,10 @@ if __name__ == '__main__':
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--n-perms', type=int, default=20)
     parser.add_argument('--seed', type=int, default=0)
+    add_lang_arg(parser)
     args = parser.parse_args()
+    init_lang(args)
 
-    import os
     import numpy as np
     import pandas as pd
     import scipy.stats

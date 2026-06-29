@@ -14,7 +14,22 @@ import seaborn as sns
 from .. import config
 from ..plot_utils import _save_or_show
 
-_LINE_PALETTE = 'Set2'
+# Fixed hue→color mapping: with a named palette, seaborn assigns colors by
+# order of first appearance in the data, which differs between eval splits
+# (EN presents Euphemistic first, SP Non-Euphemistic first). Pinned to match
+# the original EN figures: Euphemistic green, Non-Euphemistic orange.
+_SET2 = sns.color_palette('Set2')
+_LINE_PALETTE = {
+    'Euphemistic': _SET2[0],
+    'Non-Euphemistic': _SET2[1],
+    'Ground Truth': _SET2[0],
+    'Predicted': _SET2[1],
+}
+
+
+def _hue_order(df, hue_col):
+    """Fixed hue order (alphabetical) so legend order matches across datasets."""
+    return sorted(df[hue_col].unique())
 
 _PROFILE_METRICS = [
     'Outward (PET → Context)',
@@ -63,14 +78,15 @@ def _layer_range_label(agg_df):
 
 def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, title_prefix='Aggregate Attention Profile', zero_line=False):
     layers = sorted(agg_df['Layer'].unique())
+    hue_order = _hue_order(agg_df, hue_col)
 
     fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
     axes_flat = axes.flatten()
 
     for i, metric in enumerate(_PROFILE_METRICS):
         ax = axes_flat[i]
-        sns.lineplot(data=agg_df, x='Layer', y=metric, hue=hue_col, ax=ax,
-                     marker='o', palette=_LINE_PALETTE, legend=(i == 0))
+        sns.lineplot(data=agg_df, x='Layer', y=metric, hue=hue_col, hue_order=hue_order,
+                     ax=ax, marker='o', palette=_LINE_PALETTE, legend=(i == 0))
         ax.set_title(metric, fontsize=11)
         ax.set_xticks(layers)
         ax.set_xlabel('Layer' if i >= 3 else '')
@@ -91,7 +107,8 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
     # to avoid artificially narrowing the confidence interval in the lineplot.
     head_var_df = agg_df[['Layer', hue_col, 'Sample', 'Head Variance']].drop_duplicates()
     fig2, ax2 = plt.subplots(figsize=(6, 4))
-    sns.lineplot(data=head_var_df, x='Layer', y='Head Variance', hue=hue_col, marker='s', ax=ax2, palette=_LINE_PALETTE)
+    sns.lineplot(data=head_var_df, x='Layer', y='Head Variance', hue=hue_col, hue_order=hue_order,
+                 marker='s', ax=ax2, palette=_LINE_PALETTE)
     ax2.set_title(f"Aggregate Head Specialization ({title_suffix})")
     ax2.set_xticks(layers)
     plt.tight_layout()
@@ -100,12 +117,14 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
 
 def _plot_profile_by_head(agg_df, hue_col, title_suffix, file_suffix, output_dir):
     """6-panel line plot of each metric by head, split by hue_col."""
+    hue_order = _hue_order(agg_df, hue_col)
     fig, axes = plt.subplots(2, 3, figsize=(12, 5))
     fig.suptitle(f"Attention Profile by Head — {_layer_range_label(agg_df)} ({title_suffix})", fontsize=14)
     axes = axes.flatten()
 
     for i, metric in enumerate(_PROFILE_METRICS):
-        sns.lineplot(data=agg_df, x='Head', y=metric, hue=hue_col, ax=axes[i], marker='o', palette=_LINE_PALETTE)
+        sns.lineplot(data=agg_df, x='Head', y=metric, hue=hue_col, hue_order=hue_order,
+                     ax=axes[i], marker='o', palette=_LINE_PALETTE)
         axes[i].set_title(metric, fontsize=11)
         axes[i].set_xticks(range(1, config.NUM_HEADS + 1))
 

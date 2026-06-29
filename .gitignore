@@ -21,10 +21,10 @@ env/
 *.ipynb_checkpoints
 
 # Model weights and tokenizer artifacts (large binary files)
-model/*.safetensors
-model/*.bin
-model/*.pt
-model/*.pth
+model/*/*.safetensors
+model/*/*.bin
+model/*/*.pt
+model/*/*.pth
 
 # Datasets (raw and processed CSVs may contain sensitive/licensed data)
 datasets/*.csv
