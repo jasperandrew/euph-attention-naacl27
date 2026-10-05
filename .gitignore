@@ -21,16 +21,13 @@ env/
 *.ipynb_checkpoints
 
 # Model weights and tokenizer artifacts (large binary files)
-model/*/*.safetensors
-model/*/*.bin
-model/*/*.pt
-model/*/*.pth
+runs/**/*.safetensors
+runs/**/*.bin
+runs/**/*.pt
+runs/**/*.pth
 
 # Datasets (raw and processed CSVs may contain sensitive/licensed data)
 datasets/*.csv
-
-# Generated plots (reproducible from scripts)
-plots/
 
 # Editor / OS
 .idea/
@@ -48,3 +45,4 @@ htmlcov/
 
 .claude
 notes/
+output/

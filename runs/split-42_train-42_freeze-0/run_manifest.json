@@ -1,0 +1,45 @@
+{
+  "run_name": "split-42_train-42_freeze-0_2610051243",
+  "model_name": "FacebookAI/xlm-roberta-base",
+  "split_dir_name": "seed_42",
+  "split_id": "seed_42",
+  "split_seed": 42,
+  "train_seed": 42,
+  "frozen_transformer_layers": 0,
+  "embeddings_frozen": false,
+  "epochs": 20,
+  "batch_size": 32,
+  "learning_rate": 2e-05,
+  "best_checkpoint": "/content/drive/MyDrive/Research/Euphemism Attention/runs/seed_42_freeze0_seed42_20261005_1243/checkpoints/checkpoint-1170",
+  "best_checkpoint_step": 1170,
+  "best_epoch": 15.0,
+  "best_validation_metric": 0.8103896103896104,
+  "test_metrics": {
+    "test_loss": 1.6900782585144043,
+    "test_accuracy": 0.7766990291262136,
+    "test_f1": 0.8244274809160306,
+    "test_f1_macro": 0.758880407124682,
+    "test_precision": 0.7751196172248804,
+    "test_recall": 0.8804347826086957,
+    "test_runtime": 2.7734,
+    "test_samples_per_second": 111.417,
+    "test_steps_per_second": 3.606
+  },
+  "label_mapping": {
+    "0": 0,
+    "1": 1
+  },
+  "split_sizes": {
+    "train": 2470,
+    "validation": 309,
+    "test": 309
+  },
+  "device": "cuda",
+  "gpu_name": "NVIDIA L4",
+  "versions": {
+    "python": "3.13.15",
+    "torch": "2.11.0+cu130",
+    "transformers": "5.17.0",
+    "scikit_learn": "1.6.1"
+  }
+}
