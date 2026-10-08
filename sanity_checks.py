@@ -1,6 +1,6 @@
 """Six sanity checks for the layer-11 reconfiguration claim.
 
-Each eval sample is profiled three ways in a single pass (real PET span, random
+Each test sample is profiled three ways in a single pass (real PET span, random
 non-overlapping span of equal length, and PET tokens replaced with <mask>), then:
 
   1. Label-shuffle permutation control — should produce ~0 Bonferroni survivors.
@@ -13,20 +13,19 @@ non-overlapping span of equal length, and PET tokens replaced with <mask>), then
   5. PET-mask (lexical PET-specificity) — PET tokens replaced with <mask>,
      model re-run, metrics computed at the (former) PET span. Tests whether the
      configuration depends on PET *content*.
-  6. Finetuned − base difference test — base model profiled on the same eval
+  6. Finetuned − base difference test — base model profiled on the same test
      set; row-wise subtraction isolates finetuning-induced changes. Confirms
      how many layer-11 metrics are significant in the difference test.
 
 Usage:
-  python sanity_checks.py
-  python sanity_checks.py --lang sp
-  python sanity_checks.py --max-samples 50
-  python sanity_checks.py --n-perms 20 --seed 0
+  python sanity_checks.py --model-dir runs/en/<run-name>
+  python sanity_checks.py --model-dir runs/en/<run-name> --max-samples 50
+  python sanity_checks.py --model-dir runs/en/<run-name> --n-perms 20 --seed 0
 """
 import argparse
 import os
 
-from src.cli import add_lang_arg, init_lang
+from src.cli import add_json_arg, add_model_arg, init_model, write_json
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
             'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance']
@@ -94,8 +93,8 @@ def metrics_for_span(attn_weights, seq_len, span_start, span_end, sink_indices):
     return pd.DataFrame(records)
 
 
-def profile_pass(model, eval_df, rng, max_samples=None, real_only=False):
-    """Iterate eval_df, profile each sample up to three ways in a single forward pass.
+def profile_pass(model, test_df, rng, max_samples=None, real_only=False):
+    """Iterate test_df, profile each sample up to three ways in a single forward pass.
 
     Real PET and masked PET are run for every sample where the PET is found.
     Random span is only run when a non-overlapping span of equal length exists;
@@ -109,11 +108,11 @@ def profile_pass(model, eval_df, rng, max_samples=None, real_only=False):
     mask_df are empty DataFrames.
     """
     if max_samples:
-        eval_df = eval_df.head(max_samples)
+        test_df = test_df.head(max_samples)
     mask_id = TOKENIZER.mask_token_id
     real_dfs, rand_dfs, mask_dfs, lengths = [], [], [], []
     n_pred_flipped = 0
-    for _, row in eval_df.iterrows():
+    for _, row in test_df.iterrows():
         text = str(row[config.DATA_COLUMN])
         pet = str(row['pet_instance'])
         cond = 'Euphemistic' if str(row['label']) in ['1', '1.0', 'True', 'euph'] else 'Non-Euphemistic'
@@ -369,13 +368,13 @@ def check_diff_test(real_df, base_df):
 def main(args):
     print("Loading finetuned model...")
     ft_model = load_model(config.MODEL_DIR)
-    _, eval_df = load_splits()
-    print(f"Eval split: {len(eval_df)} samples")
+    _, test_df = load_splits()
+    print(f"Test split: {len(test_df)} samples")
 
     rng = np.random.default_rng(args.seed)
     print("Profiling (real PET + random span + masked PET in single pass)...")
     real_df, rand_df, mask_df, lengths, n_flipped, n_total = profile_pass(
-        ft_model, eval_df, rng, max_samples=args.max_samples)
+        ft_model, test_df, rng, max_samples=args.max_samples)
     n_samples = len(real_df) // (config.NUM_LAYERS * config.NUM_HEADS)
     print(f"  {n_samples} samples kept (after PET / random-span availability)")
     del ft_model
@@ -386,7 +385,7 @@ def main(args):
     mask_ps = to_per_sample(mask_df)
 
     if args.max_samples is None:
-        data_dir = os.path.join(config.PLOTS_DIR, 'data')
+        data_dir = os.path.join(config.PLOTS_DIR, config.MODEL_RUN_NAME, 'data')
         os.makedirs(data_dir, exist_ok=True)
         mask_df.to_parquet(os.path.join(data_dir, 'mask_df.parquet'), index=False)
         print(f"  Cached mask_df to {data_dir}/mask_df.parquet")
@@ -401,10 +400,25 @@ def main(args):
     base_model = load_model(config.MODEL_NAME)
     print("Profiling base model (real PET only)...")
     base_df, _, _, _, _, _ = profile_pass(
-        base_model, eval_df, rng, max_samples=args.max_samples, real_only=True)
+        base_model, test_df, rng, max_samples=args.max_samples, real_only=True)
     del base_model
     torch.cuda.empty_cache()
     check_diff_test(real_df, base_df)
+    write_json(args.json_out, {
+        'script': 'sanity_checks.py',
+        'model_dir': config.MODEL_DIR,
+        'split_dir': config.MODEL_RUN_DIR,
+        'n_test_samples': len(test_df),
+        'n_profiled_samples': int(n_samples),
+        'n_prediction_flips_after_masking_pet': int(n_flipped),
+        'seed': args.seed,
+        'n_permutations': args.n_perms,
+        'profiles': {'real_pet': real_df, 'random_span': rand_df,
+                     'masked_pet': mask_df, 'base_real_pet': base_df},
+        'lengths': lengths,
+    })
+    if args.json_out:
+        print(f"JSON profile data written to {args.json_out}")
 
 
 if __name__ == '__main__':
@@ -414,9 +428,10 @@ if __name__ == '__main__':
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--n-perms', type=int, default=20)
     parser.add_argument('--seed', type=int, default=0)
-    add_lang_arg(parser)
+    add_model_arg(parser)
+    add_json_arg(parser)
     args = parser.parse_args()
-    init_lang(args)
+    init_model(args)
 
     import numpy as np
     import pandas as pd

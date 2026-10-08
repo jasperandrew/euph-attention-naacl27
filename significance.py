@@ -1,6 +1,6 @@
 """Consolidated significance and verification tests.
 
-Profiles the finetuned and base XLM-R models on the eval split once each, then runs:
+Profiles the finetuned and base XLM-R models on the held-out test split once each, then runs:
 
   Section 1 — Per-layer mean values by condition; frozen vs unfrozen |Δ| ratios.
   Section 2 — Per-(metric, layer) significance on finetuned model.
@@ -9,14 +9,13 @@ Profiles the finetuned and base XLM-R models on the eval split once each, then r
   Section 5 — Per-(metric, layer) significance on (ft − base) diffs (interaction).
 
 Usage:
-  python significance.py
-  python significance.py --lang sp
-  python significance.py --max-samples 100
-  python significance.py --skip-base   # sections 1–3 only
+  python significance.py --model-dir runs/en/<run-name>
+  python significance.py --model-dir runs/en/<run-name> --max-samples 100
+  python significance.py --model-dir runs/en/<run-name> --skip-base
 """
 import argparse
 
-from src.cli import add_lang_arg, init_lang
+from src.cli import add_json_arg, add_model_arg, init_model, write_json
 
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
@@ -45,8 +44,8 @@ def sig_marker(p_bonf):
     return '***' if p_bonf < 0.001 else '**' if p_bonf < 0.01 else '*' if p_bonf < 0.05 else ''
 
 
-def profile_with_sample_id(model, eval_df, max_samples=None):
-    df = profile_dataframe(model, eval_df, text_col=config.DATA_COLUMN,
+def profile_with_sample_id(model, test_df, max_samples=None):
+    df = profile_dataframe(model, test_df, text_col=config.DATA_COLUMN,
                            pet_col='pet_instance', label_col='label',
                            max_samples=max_samples)
     df = df.copy().reset_index(drop=True)
@@ -56,6 +55,100 @@ def profile_with_sample_id(model, eval_df, max_samples=None):
 
 def per_sample_collapse(df):
     return df.groupby(['sample_id', 'Layer', 'Condition'])[_METRICS].mean().reset_index()
+
+
+def structured_tests(ft_df, ft_ps, base_df=None, base_ps=None):
+    """Build machine-readable equivalents of the printed significance tables."""
+    results = {'layer_condition_means': [], 'finetuned_layer_tests': [],
+               'finetuned_head_tests': [], 'base_vs_finetuned': [],
+               'finetuning_difference_tests': []}
+    n_layer_tests = len(_METRICS) * config.NUM_LAYERS
+    n_head_tests = len(_METRICS) * config.NUM_HEADS
+
+    for layer in range(1, config.NUM_LAYERS + 1):
+        for metric in _METRICS:
+            row = {'layer': layer, 'metric': metric}
+            for condition, key in [('Euphemistic', 'euphemistic_mean'),
+                                   ('Non-Euphemistic', 'non_euphemistic_mean')]:
+                values = ft_df.loc[(ft_df['Layer'] == layer) &
+                                   (ft_df['Condition'] == condition), metric]
+                row[key] = float(values.mean()) if len(values) else None
+            results['layer_condition_means'].append(row)
+
+            sub = ft_ps[ft_ps['Layer'] == layer]
+            e = sub.loc[sub['Condition'] == 'Euphemistic', metric].to_numpy()
+            n = sub.loc[sub['Condition'] == 'Non-Euphemistic', metric].to_numpy()
+            if len(e) and len(n):
+                _, p = scipy.stats.mannwhitneyu(e, n, alternative='two-sided')
+                p_b = min(float(p) * n_layer_tests, 1.0)
+                results['finetuned_layer_tests'].append({
+                    'layer': layer, 'metric': metric, 'n_euphemistic': len(e),
+                    'n_non_euphemistic': len(n), 'mean_euphemistic': float(e.mean()),
+                    'mean_non_euphemistic': float(n.mean()), 'cohens_d': cohens_d(e, n),
+                    'p_raw': float(p), 'p_bonferroni': p_b,
+                    'significant_bonferroni_0_05': p_b < 0.05,
+                })
+
+    for layer in (11, 12):
+        for metric in _METRICS:
+            layer_df = ft_df[ft_df['Layer'] == layer]
+            for head in range(1, config.NUM_HEADS + 1):
+                sub = layer_df[layer_df['Head'] == head]
+                e = sub.loc[sub['Condition'] == 'Euphemistic', metric].to_numpy()
+                n = sub.loc[sub['Condition'] == 'Non-Euphemistic', metric].to_numpy()
+                if len(e) and len(n):
+                    _, p = scipy.stats.mannwhitneyu(e, n, alternative='two-sided')
+                    p_b = min(float(p) * n_head_tests, 1.0)
+                    results['finetuned_head_tests'].append({
+                        'layer': layer, 'head': head, 'metric': metric,
+                        'n_euphemistic': len(e), 'n_non_euphemistic': len(n),
+                        'cohens_d': cohens_d(e, n), 'p_raw': float(p),
+                        'p_bonferroni': p_b,
+                        'significant_bonferroni_0_05': p_b < 0.05,
+                    })
+
+    if base_ps is not None:
+        for layer in range(1, config.NUM_LAYERS + 1):
+            for metric in _METRICS:
+                b = base_ps[base_ps['Layer'] == layer]
+                f = ft_ps[ft_ps['Layer'] == layer]
+                be = b.loc[b['Condition'] == 'Euphemistic', metric].to_numpy()
+                bn = b.loc[b['Condition'] == 'Non-Euphemistic', metric].to_numpy()
+                fe = f.loc[f['Condition'] == 'Euphemistic', metric].to_numpy()
+                fn = f.loc[f['Condition'] == 'Non-Euphemistic', metric].to_numpy()
+                if all(len(v) for v in (be, bn, fe, fn)):
+                    _, pb = scipy.stats.mannwhitneyu(be, bn, alternative='two-sided')
+                    _, pf = scipy.stats.mannwhitneyu(fe, fn, alternative='two-sided')
+                    db, df = cohens_d(be, bn), cohens_d(fe, fn)
+                    results['base_vs_finetuned'].append({
+                        'layer': layer, 'metric': metric, 'cohens_d_base': db,
+                        'cohens_d_finetuned': df, 'delta_cohens_d': df - db,
+                        'p_base_bonferroni': min(float(pb) * n_layer_tests, 1.0),
+                        'p_finetuned_bonferroni': min(float(pf) * n_layer_tests, 1.0),
+                    })
+
+        if len(ft_df) == len(base_df):
+            diff_df = ft_df.copy()
+            for metric in _METRICS:
+                diff_df[metric] = ft_df[metric].to_numpy() - base_df[metric].to_numpy()
+            diff_ps = per_sample_collapse(diff_df)
+            for layer in range(1, config.NUM_LAYERS + 1):
+                for metric in _METRICS:
+                    sub = diff_ps[diff_ps['Layer'] == layer]
+                    e = sub.loc[sub['Condition'] == 'Euphemistic', metric].to_numpy()
+                    n = sub.loc[sub['Condition'] == 'Non-Euphemistic', metric].to_numpy()
+                    if len(e) and len(n):
+                        _, p = scipy.stats.mannwhitneyu(e, n, alternative='two-sided')
+                        p_b = min(float(p) * n_layer_tests, 1.0)
+                        results['finetuning_difference_tests'].append({
+                            'layer': layer, 'metric': metric,
+                            'mean_delta_euphemistic': float(e.mean()),
+                            'mean_delta_non_euphemistic': float(n.mean()),
+                            'cohens_d': cohens_d(e, n), 'p_raw': float(p),
+                            'p_bonferroni': p_b,
+                            'significant_bonferroni_0_05': p_b < 0.05,
+                        })
+    return results
 
 
 def section(title):
@@ -189,12 +282,12 @@ def section_5_diff(ft_df, base_df):
 
 
 def main(args):
-    _, eval_df = load_splits()
-    print(f"Eval split: {len(eval_df)} samples")
+    _, test_df = load_splits()
+    print(f"Test split: {len(test_df)} samples")
 
     print("\nProfiling finetuned model...")
     ft_model = load_model(config.MODEL_DIR)
-    ft_df = profile_with_sample_id(ft_model, eval_df, args.max_samples)
+    ft_df = profile_with_sample_id(ft_model, test_df, args.max_samples)
     del ft_model
     torch.cuda.empty_cache()
     ft_ps = per_sample_collapse(ft_df)
@@ -203,7 +296,7 @@ def main(args):
     if not args.skip_base:
         print("Profiling base model...")
         base_model = load_model(config.MODEL_NAME)
-        base_df = profile_with_sample_id(base_model, eval_df, args.max_samples)
+        base_df = profile_with_sample_id(base_model, test_df, args.max_samples)
         del base_model
         torch.cuda.empty_cache()
         base_ps = per_sample_collapse(base_df)
@@ -215,17 +308,33 @@ def main(args):
         section_4_base_vs_ft(base_ps, ft_ps)
         section_5_diff(ft_df, base_df)
 
+    structured = structured_tests(ft_df, ft_ps, base_df, base_ps)
+
+    write_json(args.json_out, {
+        'script': 'significance.py',
+        'model_dir': config.MODEL_DIR,
+        'split_dir': config.MODEL_RUN_DIR,
+        'n_test_samples': len(test_df),
+        'metrics': _METRICS,
+        'bonferroni': {'alpha': 0.05, 'layer_tests': len(_METRICS) * config.NUM_LAYERS,
+                       'head_tests': len(_METRICS) * config.NUM_HEADS},
+        'results': structured,
+    })
+    if args.json_out:
+        print(f"JSON profile data written to {args.json_out}")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Per-(metric, layer, head) significance tests and base-vs-finetuned effect-size comparisons on the eval split."
+        description="Per-(metric, layer, head) significance tests and base-vs-finetuned effect-size comparisons on the held-out test split."
     )
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--skip-base', action='store_true',
                         help='Skip base-model passes (sections 1–3 only).')
-    add_lang_arg(parser)
+    add_model_arg(parser)
+    add_json_arg(parser)
     args = parser.parse_args()
-    init_lang(args)
+    init_model(args)
 
     import numpy as np
     import scipy.stats

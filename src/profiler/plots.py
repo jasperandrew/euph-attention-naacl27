@@ -14,10 +14,7 @@ import seaborn as sns
 from .. import config
 from ..plot_utils import _save_or_show
 
-# Fixed hue→color mapping: with a named palette, seaborn assigns colors by
-# order of first appearance in the data, which differs between eval splits
-# (EN presents Euphemistic first, SP Non-Euphemistic first). Pinned to match
-# the original EN figures: Euphemistic green, Non-Euphemistic orange.
+# Fixed hue→color mapping keeps condition colors stable across every plot.
 _SET2 = sns.color_palette('Set2')
 _LINE_PALETTE = {
     'Euphemistic': _SET2[0],

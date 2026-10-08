@@ -71,6 +71,19 @@ LAyer 12 -- specify how classification is done. If we use the standard <s> repre
 
 For the partial-freeze model, do we freeze the embeddings too? 
 ```
+
+Meeting Notes
+- how is attention/entropy computed?
+- clarify equation variables
+- verify attention summation -- sums to 1? how does both inward and outward attn increase?
+  - why does entropy increase?
+- absolute significance/cohen's d references in text body
+- consistent use of d
+- pet masking chart is not very readable
+- Fig 2 - random span as well?
+- story with examples. why is inward/internal attn increasing? why not outward?
+- pet-only classification
+
 # Other TODOs
 
 ## 1. `FROZEN_LAYERS` is global but should be per-model

@@ -1,25 +1,25 @@
 """
 Single-sentence profiler entry point.
 
-Runs the unpaired attention profiler across the eval split, aggregating metrics
+Runs the unpaired attention profiler across the held-out test split, aggregating metrics
 per layer and condition. By default also profiles the base XLM-R model and emits
 a ft−base difference plot. Always produces the layer-11 per-head lollipop plot.
 
-Profiling data is cached to plots/data/ as parquet files and reused on subsequent
-runs. Use --no-cache to force re-running inference.
+Profiling data is cached under output/plots/<run-name>/data/ as parquet files
+and reused on subsequent runs. Use --no-cache to force re-running inference.
 
 Usage:
-  python plot_profile.py
-  python plot_profile.py --lang sp
-  python plot_profile.py --layers unfrozen
-  python plot_profile.py --skip-base       # finetuned only, no diff plot
-  python plot_profile.py --max-samples 50  # quick test (skips cache)
-  python plot_profile.py --no-cache        # force re-run and overwrite cache
+  python plot_profile.py --model-dir runs/en/<run-name>
+  python plot_profile.py --model-dir runs/en/<run-name>
+  python plot_profile.py --model-dir runs/en/<run-name> --layers unfrozen
+  python plot_profile.py --model-dir runs/en/<run-name> --skip-base
+  python plot_profile.py --model-dir runs/en/<run-name> --max-samples 50
+  python plot_profile.py --model-dir runs/en/<run-name> --no-cache
 """
 import argparse
 import os
 
-from src.cli import add_lang_arg, init_lang
+from src.cli import add_json_arg, add_model_arg, init_model, write_json
 
 
 _METRIC_COLS = [
@@ -34,7 +34,7 @@ _METRIC_COLS = [
 
 
 def _data_dir():
-    return os.path.join(config.PLOTS_DIR, 'data')
+    return os.path.join(config.PLOTS_DIR, config.MODEL_RUN_NAME, 'data')
 
 
 def _cache_path(name):
@@ -70,9 +70,9 @@ def load_model(model_id_or_dir):
     return model
 
 
-def profile(model, eval_df, max_samples):
+def profile(model, test_df, max_samples):
     return profile_dataframe(
-        model, eval_df,
+        model, test_df,
         text_col=config.DATA_COLUMN,
         pet_col='pet_instance',
         label_col='label',
@@ -81,19 +81,19 @@ def profile(model, eval_df, max_samples):
 
 
 def main(args):
-    profile_dir = os.path.join(config.PLOTS_DIR, 'profiler')
+    profile_dir = os.path.join(config.PLOTS_DIR, config.MODEL_RUN_NAME)
     os.makedirs(profile_dir, exist_ok=True)
     use_cache = not args.no_cache and args.max_samples is None
 
-    print("Loading eval split...")
-    _, eval_df = load_splits()
-    print(f"  {len(eval_df)} samples")
+    print("Loading held-out test split...")
+    _, test_df = load_splits()
+    print(f"  {len(test_df)} samples")
 
     ft_df = _load_cache('ft_df') if use_cache else None
     if ft_df is None:
         print("Profiling finetuned model...")
         ft_model = load_model(config.MODEL_DIR)
-        ft_df = profile(ft_model, eval_df, args.max_samples)
+        ft_df = profile(ft_model, test_df, args.max_samples)
         del ft_model
         torch.cuda.empty_cache()
         if ft_df is None:
@@ -103,6 +103,13 @@ def main(args):
             _save_cache(ft_df, 'ft_df')
 
     unfrozen_only = (args.layers == 'unfrozen')
+    results = {
+        'script': 'plot_profile.py',
+        'model_dir': config.MODEL_DIR,
+        'split_dir': config.MODEL_RUN_DIR,
+        'n_profile_rows': len(ft_df),
+        'finetuned_profiles': ft_df,
+    }
     plot_aggregate_profiles(ft_df, output_dir=profile_dir, unfrozen_only=unfrozen_only)
     plot_layer11_lollipop(ft_df, output_dir=profile_dir)
     if 'Predicted' in ft_df.columns:
@@ -117,7 +124,7 @@ def main(args):
         if base_df is None:
             print("Profiling base model...")
             base_model = load_model(config.MODEL_NAME)
-            base_df = profile(base_model, eval_df, args.max_samples)
+            base_df = profile(base_model, test_df, args.max_samples)
             del base_model
             torch.cuda.empty_cache()
             if use_cache:
@@ -130,25 +137,31 @@ def main(args):
         diff_df = ft_df.copy()
         for col in _METRIC_COLS:
             diff_df[col] = ft_df[col].values - base_df[col].values
+        results['base_profiles'] = base_df
+        results['finetuned_minus_base_profiles'] = diff_df
         plot_finetuning_diff_profile(diff_df, output_dir=profile_dir, unfrozen_only=unfrozen_only)
         plot_base_vs_finetuned(ft_df, base_df, output_dir=profile_dir, unfrozen_only=unfrozen_only)
 
     print(f"Plots saved to {profile_dir}/")
+    write_json(args.json_out, results)
+    if args.json_out:
+        print(f"JSON results written to {args.json_out}")
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Single-sentence euphemism attention profiler")
     parser.add_argument('--max-samples', type=int, default=None,
-                        help="Limit number of eval samples (useful for quick testing); disables cache")
+                        help="Limit number of test samples (useful for quick testing); disables cache")
     parser.add_argument('--layers', choices=['all', 'unfrozen'], default='all',
                         help="Which layers to include in plots (default: all)")
     parser.add_argument('--skip-base', action='store_true',
                         help="Skip the base-model pass and the ft−base diff plot.")
     parser.add_argument('--no-cache', action='store_true',
                         help="Force re-running inference and overwrite cached parquet files.")
-    add_lang_arg(parser)
+    add_model_arg(parser)
+    add_json_arg(parser)
     args = parser.parse_args()
-    init_lang(args)
+    init_model(args)
 
     import torch
     from transformers import AutoModelForSequenceClassification

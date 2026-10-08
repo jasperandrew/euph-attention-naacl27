@@ -9,14 +9,9 @@ from transformers import AutoTokenizer
 from . import config
 
 if not os.path.isfile(os.path.join(config.MODEL_DIR, 'config.json')):
-    _model_root = os.path.join(config.BASE_DIR, 'model')
-    _available = sorted(
-        d for d in os.listdir(_model_root)
-        if os.path.isfile(os.path.join(_model_root, d, 'config.json'))
-    )
     raise FileNotFoundError(
-        f"No finetuned model for language '{config.LANG}' at {config.MODEL_DIR}. "
-        f"Available: {_available}"
+        f"No fine-tuned model config found at {config.MODEL_DIR}; "
+        "select a run with --model-dir."
     )
 
 TOKENIZER = AutoTokenizer.from_pretrained(config.MODEL_DIR)
@@ -35,15 +30,19 @@ def get_tokens(tokenized_input):
 
 
 def load_splits():
-    """Load pre-saved train/eval splits from the model directory, or re-split from CSV."""
-    train_path = os.path.join(config.MODEL_DIR, 'split_train.csv')
-    eval_path = os.path.join(config.MODEL_DIR, 'split_eval.csv')
+    """Return (train, held-out test); supports legacy model runs with split_eval.csv."""
+    train_path = os.path.join(config.MODEL_RUN_DIR, 'split_train.csv')
+    test_path = os.path.join(config.MODEL_RUN_DIR, 'split_test.csv')
+    eval_path = os.path.join(config.MODEL_RUN_DIR, 'split_eval.csv')
+    if os.path.exists(train_path) and os.path.exists(test_path):
+        print("Loading saved train split and held-out test split from model run directory.")
+        return pd.read_csv(train_path), pd.read_csv(test_path)
     if os.path.exists(train_path) and os.path.exists(eval_path):
-        print("Loading saved train/eval splits from model directory.")
+        print("Loading legacy train/eval splits; using eval as the held-out split.")
         return pd.read_csv(train_path), pd.read_csv(eval_path)
 
     csv_path = os.path.join(config.DATASET_DIR, config.CSV_NAME)
-    print(f"Splitting dataset from {csv_path}")
+    print(f"Creating train/test split from {csv_path}")
     data = pd.read_csv(csv_path)
     return train_test_split(data, test_size=config.TEST_SIZE, random_state=config.RANDOM_SEED)
 
