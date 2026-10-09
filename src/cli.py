@@ -1,10 +1,20 @@
 import os
 import json
+import logging
 import math
 from pathlib import Path
 import sys
 
 from . import config
+
+
+def configure_logging(verbose=False):
+    """Configure concise, consistent console output for the command-line tools."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format='%(message)s',
+        force=True,
+    )
 
 
 def add_model_arg(parser):
@@ -51,6 +61,7 @@ def write_json(path, payload):
 
 def init_model(args):
     """Apply the explicitly selected model before importing data_utils/tokenizer."""
+    configure_logging(getattr(args, 'verbose', False))
     config.set_model_dir(args.model_dir)
     if hasattr(args, 'json_out') and args.json_out is None:
         script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0]

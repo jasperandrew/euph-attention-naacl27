@@ -1,11 +1,14 @@
 """Aggregate generated per-run evaluation and statistical results."""
 import argparse
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu
+
+logger = logging.getLogger(__name__)
 
 
 METRICS = [
@@ -583,6 +586,7 @@ def render_plaintext(runs, comparisons, recurrence):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description='Summarize cross-run performance, effect stability, and controls.'
@@ -634,7 +638,7 @@ def main():
         f.write('\n')
     output_txt.parent.mkdir(parents=True, exist_ok=True)
     output_txt.write_text(render_plaintext(runs, comparisons, recurrence), encoding='utf-8')
-    print(f"Summarized {len(runs)} run(s) to:\n  {output_txt}\n  {output_json}")
+    logger.info("Summarized %s run(s) to:\n  %s\n  %s", len(runs), output_txt, output_json)
 
 
 if __name__ == '__main__':

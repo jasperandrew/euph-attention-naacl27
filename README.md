@@ -29,6 +29,22 @@ is still produced. When a run has saved splits, these scripts evaluate its test
 split. Outputs are separated by run name so results from different checkpoints
 do not overwrite or reuse one another.
 
+To run evaluation and statistics sequentially while loading each model only
+once, use `all_stats.py`. It runs all three workflows by default; select a
+subset with `--only`:
+
+```bash
+python all_stats.py --model-dir runs/en/<run-name>
+python all_stats.py --model-dir runs/en/<run-name> --only evaluate significance
+python all_stats.py --all-models
+python all_stats.py --all-models --jobs 2
+```
+
+`--all-models` discovers run directories containing `model/config.json` under
+`runs/`. Runs are serial by default. `--jobs N` processes up to N model runs at
+once; each worker can hold both a fine-tuned and a base model, so increase N
+only when device memory allows it.
+
 ### Euphemism Dataset (as of 05/2026)
 1. Download [EN-euphs-2025.csv](https://github.com/NLPlabMSU/lrec-euph/blob/main/Datasets/final-datasets/csv/EN-euphs-2025.csv) from the prior study's project repo, and place it in the `datasets` folder.
 2. Run `process-euphs.py`

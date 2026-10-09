@@ -14,23 +14,25 @@ Usage:
   python significance.py --model-dir runs/en/<run-name> --skip-base
 """
 import argparse
+import logging
+import numpy as np
+import scipy.stats
+import torch
 
 from src.cli import add_json_arg, add_model_arg, init_model, write_json
+from src.stats.models import load_classifier
+from src import config
+from src.data_utils import load_splits
+from src.profiler.analysis import profile_dataframe
 
 
 _METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
             'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance']
+logger = logging.getLogger(__name__)
 
 
 def load_model(model_id_or_dir):
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_id_or_dir, output_attentions=True, attn_implementation="eager",
-        num_labels=2,
-    )
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    model.eval()
-    return model
+    return load_classifier(model_id_or_dir)
 
 
 def cohens_d(a, b):
@@ -48,8 +50,16 @@ def profile_with_sample_id(model, test_df, max_samples=None):
     df = profile_dataframe(model, test_df, text_col=config.DATA_COLUMN,
                            pet_col='pet_instance', label_col='label',
                            max_samples=max_samples)
+    return add_sample_ids(df)
+
+
+def add_sample_ids(df):
+    """Attach the sample index implied by profile_dataframe's row ordering."""
     df = df.copy().reset_index(drop=True)
-    df['sample_id'] = df.index // (config.NUM_LAYERS * config.NUM_HEADS)
+    block_size = config.NUM_LAYERS * config.NUM_HEADS
+    if len(df) % block_size:
+        raise ValueError(f'Profile row count {len(df)} is not divisible by {block_size}')
+    df['sample_id'] = df.index // block_size
     return df
 
 
@@ -152,16 +162,16 @@ def structured_tests(ft_df, ft_ps, base_df=None, base_ps=None):
 
 
 def section(title):
-    print("\n" + "=" * 80)
-    print(f" {title}")
-    print("=" * 80)
+    logger.debug("\n" + "=" * 80)
+    logger.debug(f" {title}")
+    logger.debug("=" * 80)
 
 
 def section_1_means(ft_df):
     section("Section 1 — Mean per-layer values by condition (verify_claims)")
     e = ft_df[ft_df['Condition'] == 'Euphemistic']
     n = ft_df[ft_df['Condition'] == 'Non-Euphemistic']
-    print(f"\n  {'Layer':>6} {'Metric':>26} {'Euph':>10} {'Non':>10} {'Diff':>10} {'%Δ':>8}")
+    logger.debug(f"\n  {'Layer':>6} {'Metric':>26} {'Euph':>10} {'Non':>10} {'Diff':>10} {'%Δ':>8}")
     for layer in range(1, config.NUM_LAYERS + 1):
         for m in _METRICS:
             em = e[e['Layer'] == layer][m].mean()
@@ -169,11 +179,11 @@ def section_1_means(ft_df):
             diff = em - nm
             pct = 100 * diff / nm if nm != 0 else float('nan')
             mark = '  [frozen]' if layer <= config.FROZEN_LAYERS else ''
-            print(f"  {layer:>6} {m:>26} {em:>10.4f} {nm:>10.4f} {diff:>+10.4f} {pct:>+7.1f}%{mark}")
-        print()
+            logger.debug(f"  {layer:>6} {m:>26} {em:>10.4f} {nm:>10.4f} {diff:>+10.4f} {pct:>+7.1f}%{mark}")
+        logger.debug("")
 
-    print(f"\n  Frozen vs unfrozen mean |Δ| per metric")
-    print(f"  {'Metric':>26} {'frozen |Δ|':>12} {'unfrozen |Δ|':>14} {'ratio':>8}")
+    logger.debug(f"\n  Frozen vs unfrozen mean |Δ| per metric")
+    logger.debug(f"  {'Metric':>26} {'frozen |Δ|':>12} {'unfrozen |Δ|':>14} {'ratio':>8}")
     for m in _METRICS:
         fz, uf = [], []
         for layer in range(1, config.NUM_LAYERS + 1):
@@ -182,15 +192,15 @@ def section_1_means(ft_df):
             (fz if layer <= config.FROZEN_LAYERS else uf).append(abs(em - nm))
         fz_m, uf_m = float(np.mean(fz)), float(np.mean(uf))
         ratio = uf_m / fz_m if fz_m > 0 else float('inf')
-        print(f"  {m:>26} {fz_m:>12.4f} {uf_m:>14.4f} {ratio:>8.2f}x")
+        logger.debug(f"  {m:>26} {fz_m:>12.4f} {uf_m:>14.4f} {ratio:>8.2f}x")
 
 
 def section_2_ft_layer(ft_ps):
     section("Section 2 — Per-(metric, layer) significance, finetuned model")
     n_tests = len(_METRICS) * config.NUM_LAYERS
     thresh = 0.05 / n_tests
-    print(f"  {n_tests} tests; Bonferroni p < {thresh:.2e}\n")
-    print(f"  {'Metric':>26} {'Layer':>6} {'mean Euph':>10} {'mean Non':>10} "
+    logger.debug(f"  {n_tests} tests; Bonferroni p < {thresh:.2e}\n")
+    logger.debug(f"  {'Metric':>26} {'Layer':>6} {'mean Euph':>10} {'mean Non':>10} "
           f"{'d':>8} {'p (raw)':>11} {'p (bonf)':>11} {'sig':>5}")
     for m in _METRICS:
         for layer in range(1, config.NUM_LAYERS + 1):
@@ -201,9 +211,9 @@ def section_2_ft_layer(ft_ps):
             p_b = min(p * n_tests, 1.0)
             d = cohens_d(e, n)
             mark = '  [frozen]' if layer <= config.FROZEN_LAYERS else ''
-            print(f"  {m:>26} {layer:>6} {e.mean():>10.4f} {n.mean():>10.4f} "
+            logger.debug(f"  {m:>26} {layer:>6} {e.mean():>10.4f} {n.mean():>10.4f} "
                   f"{d:>+8.3f} {p:>11.2e} {p_b:>11.2e} {sig_marker(p_b):>5}{mark}")
-        print()
+        logger.debug("")
 
 
 def section_3_heads(ft_df):
@@ -211,8 +221,8 @@ def section_3_heads(ft_df):
     n_tests = len(_METRICS) * config.NUM_HEADS
     thresh = 0.05 / n_tests
     for layer in [11, 12]:
-        print(f"\n  Layer {layer} — {n_tests} tests, Bonferroni p < {thresh:.2e}\n")
-        print(f"  {'Metric':>26} {'Head':>4} {'d':>8} {'p (raw)':>11} {'p (bonf)':>11} {'sig':>5}")
+        logger.debug(f"\n  Layer {layer} — {n_tests} tests, Bonferroni p < {thresh:.2e}\n")
+        logger.debug(f"  {'Metric':>26} {'Head':>4} {'d':>8} {'p (raw)':>11} {'p (bonf)':>11} {'sig':>5}")
         ldf = ft_df[ft_df['Layer'] == layer]
         for m in _METRICS:
             for head in range(1, config.NUM_HEADS + 1):
@@ -222,16 +232,16 @@ def section_3_heads(ft_df):
                 _, p = scipy.stats.mannwhitneyu(e, n, alternative='two-sided')
                 p_b = min(p * n_tests, 1.0)
                 d = cohens_d(e, n)
-                print(f"  {m:>26} {head:>4} {d:>+8.3f} {p:>11.2e} {p_b:>11.2e} {sig_marker(p_b):>5}")
-            print()
+                logger.debug(f"  {m:>26} {head:>4} {d:>+8.3f} {p:>11.2e} {p_b:>11.2e} {sig_marker(p_b):>5}")
+            logger.debug("")
 
 
 def section_4_base_vs_ft(base_ps, ft_ps):
     section("Section 4 — Base vs finetuned d per (metric, layer); Δd = d_ft − d_base")
     n_tests = len(_METRICS) * config.NUM_LAYERS
     thresh = 0.05 / n_tests
-    print(f"  Bonferroni p < {thresh:.2e}\n")
-    print(f"  {'Metric':>26} {'Layer':>6} {'d_base':>8} {'d_ft':>8} {'Δd':>8} "
+    logger.debug(f"  Bonferroni p < {thresh:.2e}\n")
+    logger.debug(f"  {'Metric':>26} {'Layer':>6} {'d_base':>8} {'d_ft':>8} {'Δd':>8} "
           f"{'p_base':>13} {'p_ft':>13}")
     for m in _METRICS:
         for layer in range(1, config.NUM_LAYERS + 1):
@@ -248,15 +258,15 @@ def section_4_base_vs_ft(base_ps, ft_ps):
             d_b = cohens_d(eb, nb)
             d_f = cohens_d(ef, nf)
             frozen = '  [frozen]' if layer <= config.FROZEN_LAYERS else ''
-            print(f"  {m:>26} {layer:>6} {d_b:>+8.3f} {d_f:>+8.3f} {(d_f - d_b):>+8.3f} "
+            logger.debug(f"  {m:>26} {layer:>6} {d_b:>+8.3f} {d_f:>+8.3f} {(d_f - d_b):>+8.3f} "
                   f"{pb_b:>10.2e}{sig_marker(pb_b):>3} {pf_b:>10.2e}{sig_marker(pf_b):>3}{frozen}")
-        print()
+        logger.debug("")
 
 
 def section_5_diff(ft_df, base_df):
     section("Section 5 — Per-(metric, layer) significance on (ft − base) diffs (interaction)")
     if len(ft_df) != len(base_df):
-        print(f"  Skipped — row counts differ (ft={len(ft_df)}, base={len(base_df)}).")
+        logger.debug(f"  Skipped — row counts differ (ft={len(ft_df)}, base={len(base_df)}).")
         return
     diff_df = ft_df.copy()
     for col in _METRICS:
@@ -264,8 +274,8 @@ def section_5_diff(ft_df, base_df):
     diff_ps = per_sample_collapse(diff_df)
     n_tests = len(_METRICS) * config.NUM_LAYERS
     thresh = 0.05 / n_tests
-    print(f"  {n_tests} tests; Bonferroni p < {thresh:.2e}\n")
-    print(f"  {'Metric':>26} {'Layer':>6} {'mean Δ_E':>11} {'mean Δ_N':>11} "
+    logger.debug(f"  {n_tests} tests; Bonferroni p < {thresh:.2e}\n")
+    logger.debug(f"  {'Metric':>26} {'Layer':>6} {'mean Δ_E':>11} {'mean Δ_N':>11} "
           f"{'d':>8} {'p (raw)':>11} {'p (bonf)':>11} {'sig':>5}")
     for m in _METRICS:
         for layer in range(1, config.NUM_LAYERS + 1):
@@ -276,29 +286,36 @@ def section_5_diff(ft_df, base_df):
             p_b = min(p * n_tests, 1.0)
             d = cohens_d(e, n)
             frozen = '  [frozen]' if layer <= config.FROZEN_LAYERS else ''
-            print(f"  {m:>26} {layer:>6} {e.mean():>+11.4f} {n.mean():>+11.4f} "
+            logger.debug(f"  {m:>26} {layer:>6} {e.mean():>+11.4f} {n.mean():>+11.4f} "
                   f"{d:>+8.3f} {p:>11.2e} {p_b:>11.2e} {sig_marker(p_b):>5}{frozen}")
-        print()
+        logger.debug("")
 
 
-def main(args):
+def main(args, precomputed_profiles=None):
     _, test_df = load_splits()
-    print(f"Test split: {len(test_df)} samples")
+    logger.info(f"Test split: {len(test_df)} samples")
 
-    print("\nProfiling finetuned model...")
-    ft_model = load_model(config.MODEL_DIR)
-    ft_df = profile_with_sample_id(ft_model, test_df, args.max_samples)
-    del ft_model
-    torch.cuda.empty_cache()
+    if precomputed_profiles is not None:
+        logger.info("\nReusing shared attention profiles...")
+        ft_df = add_sample_ids(precomputed_profiles['real_ft'])
+    else:
+        logger.info("\nProfiling finetuned model...")
+        ft_model = load_model(config.MODEL_DIR)
+        ft_df = profile_with_sample_id(ft_model, test_df, args.max_samples)
+        del ft_model
+        torch.cuda.empty_cache()
     ft_ps = per_sample_collapse(ft_df)
 
     base_df, base_ps = None, None
     if not args.skip_base:
-        print("Profiling base model...")
-        base_model = load_model(config.MODEL_NAME)
-        base_df = profile_with_sample_id(base_model, test_df, args.max_samples)
-        del base_model
-        torch.cuda.empty_cache()
+        if precomputed_profiles is not None and precomputed_profiles.get('base_real') is not None:
+            base_df = add_sample_ids(precomputed_profiles['base_real'])
+        else:
+            logger.info("Profiling base model...")
+            base_model = load_model(config.MODEL_NAME)
+            base_df = profile_with_sample_id(base_model, test_df, args.max_samples)
+            del base_model
+            torch.cuda.empty_cache()
         base_ps = per_sample_collapse(base_df)
 
     section_1_means(ft_df)
@@ -321,7 +338,8 @@ def main(args):
         'results': structured,
     })
     if args.json_out:
-        print(f"JSON profile data written to {args.json_out}")
+        logger.info(f"JSON profile data written to {args.json_out}")
+    return {'real_ft': ft_df, 'base_real': base_df}
 
 
 if __name__ == '__main__':
@@ -331,17 +349,11 @@ if __name__ == '__main__':
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--skip-base', action='store_true',
                         help='Skip base-model passes (sections 1–3 only).')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Show detailed per-metric statistical reports.')
     add_model_arg(parser)
     add_json_arg(parser)
     args = parser.parse_args()
     init_model(args)
-
-    import numpy as np
-    import scipy.stats
-    import torch
-    from transformers import AutoModelForSequenceClassification
-    from src import config
-    from src.data_utils import load_splits
-    from src.profiler.analysis import profile_dataframe
 
     main(args)

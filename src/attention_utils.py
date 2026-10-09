@@ -1,9 +1,12 @@
 import numpy as np
+import logging
 import torch
 import pandas as pd
 import scipy.stats
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -15,7 +18,9 @@ def get_attn_weights(model, tokenized_input):
     attn_mask = tokenized_input['attention_mask'].to(model.device)
     model.eval()
     with torch.no_grad():
-        output = model(input_ids=input_ids, attention_mask=attn_mask)
+        output = model(
+            input_ids=input_ids, attention_mask=attn_mask, output_attentions=True,
+        )
     return output.attentions
 
 
@@ -28,7 +33,9 @@ def get_model_output(model, tokenized_input):
     attn_mask = tokenized_input['attention_mask'].to(model.device)
     model.eval()
     with torch.no_grad():
-        output = model(input_ids=input_ids, attention_mask=attn_mask)
+        output = model(
+            input_ids=input_ids, attention_mask=attn_mask, output_attentions=True,
+        )
     pred_id = int(torch.argmax(output.logits, dim=-1).item())
     pred_label = 'Euphemistic' if pred_id == 1 else 'Non-Euphemistic'
     return output.attentions, pred_label
@@ -68,7 +75,7 @@ def _find_unbounded_pet(tokens, pet_phrase):
             if len(acc) >= target_len:
                 break
 
-    print(f"Warning: PET sequence '{display_name}' not found in the input sequence.")
+    logger.warning("PET sequence '%s' not found in the input sequence.", display_name)
     return None, None
 
 
@@ -81,7 +88,7 @@ def _find_bounded_pet(tokens, include_bounds=False):
         pet_start = tokens.index(config.BOUND_TOKEN) + 1
         pet_end = tokens.index(config.BOUND_TOKEN, pet_start)
     except ValueError:
-        print(f"Warning: {config.BOUND_TOKEN} tokens not found twice in the input sequence.")
+        logger.warning("%s tokens not found twice in the input sequence.", config.BOUND_TOKEN)
         return None, None
 
     if include_bounds:
@@ -89,7 +96,7 @@ def _find_bounded_pet(tokens, include_bounds=False):
         pet_end += 1
 
     if pet_start >= pet_end:
-        print(f"Warning: No tokens found strictly between the {config.BOUND_TOKEN} tokens.")
+        logger.warning("No tokens found strictly between the %s tokens.", config.BOUND_TOKEN)
         return None, None
 
     return pet_start, pet_end
@@ -123,7 +130,7 @@ def get_non_pet_attention(attn_head_weights, tokens, pet_indices):
         non_pet_tokens.append(tokens[pet_end:len(tokens)])
 
     if not non_pet_weights:
-        print("Warning: No tokens found outside the defined PET region.")
+        logger.warning("No tokens found outside the defined PET region.")
         return None, None
 
     return non_pet_weights, non_pet_tokens
@@ -135,7 +142,7 @@ def get_bound_attention(attn_head_weights, tokens):
         b1 = tokens.index(config.BOUND_TOKEN)
         b2 = tokens.index(config.BOUND_TOKEN, b1 + 1)
     except ValueError:
-        print(f"Warning: {config.BOUND_TOKEN} tokens not found twice in the input sequence.")
+        logger.warning("%s tokens not found twice in the input sequence.", config.BOUND_TOKEN)
         return None, None
     bound_indices = [b1, b2]
     return attn_head_weights[np.ix_(bound_indices, bound_indices)], [config.BOUND_TOKEN, config.BOUND_TOKEN]

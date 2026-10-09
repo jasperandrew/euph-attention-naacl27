@@ -17,9 +17,13 @@ Usage:
   python plot_profile.py --model-dir runs/en/<run-name> --no-cache
 """
 import argparse
+import logging
 import os
 
 from src.cli import add_json_arg, add_model_arg, init_model, write_json
+from src.stats.models import load_classifier
+
+logger = logging.getLogger(__name__)
 
 
 _METRIC_COLS = [
@@ -45,7 +49,7 @@ def _load_cache(name):
     import pandas as pd
     path = _cache_path(name)
     if os.path.exists(path):
-        print(f"  Loading cached {name} from {path}")
+        logger.info(f"  Loading cached {name} from {path}")
         return pd.read_parquet(path)
     return None
 
@@ -54,20 +58,11 @@ def _save_cache(df, name):
     os.makedirs(_data_dir(), exist_ok=True)
     path = _cache_path(name)
     df.to_parquet(path, index=False)
-    print(f"  Cached {name} to {path}")
+    logger.info(f"  Cached {name} to {path}")
 
 
 def load_model(model_id_or_dir):
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_id_or_dir,
-        output_attentions=True,
-        attn_implementation="eager",
-        num_labels=2,
-    )
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    model.eval()
-    return model
+    return load_classifier(model_id_or_dir)
 
 
 def profile(model, test_df, max_samples):
@@ -85,19 +80,19 @@ def main(args):
     os.makedirs(profile_dir, exist_ok=True)
     use_cache = not args.no_cache and args.max_samples is None
 
-    print("Loading held-out test split...")
+    logger.info("Loading held-out test split...")
     _, test_df = load_splits()
-    print(f"  {len(test_df)} samples")
+    logger.info(f"  {len(test_df)} samples")
 
     ft_df = _load_cache('ft_df') if use_cache else None
     if ft_df is None:
-        print("Profiling finetuned model...")
+        logger.info("Profiling finetuned model...")
         ft_model = load_model(config.MODEL_DIR)
         ft_df = profile(ft_model, test_df, args.max_samples)
         del ft_model
         torch.cuda.empty_cache()
         if ft_df is None:
-            print("No valid profiles extracted.")
+            logger.info("No valid profiles extracted.")
             return
         if use_cache:
             _save_cache(ft_df, 'ft_df')
@@ -122,7 +117,7 @@ def main(args):
     if not args.skip_base:
         base_df = _load_cache('base_df') if use_cache else None
         if base_df is None:
-            print("Profiling base model...")
+            logger.info("Profiling base model...")
             base_model = load_model(config.MODEL_NAME)
             base_df = profile(base_model, test_df, args.max_samples)
             del base_model
@@ -142,10 +137,10 @@ def main(args):
         plot_finetuning_diff_profile(diff_df, output_dir=profile_dir, unfrozen_only=unfrozen_only)
         plot_base_vs_finetuned(ft_df, base_df, output_dir=profile_dir, unfrozen_only=unfrozen_only)
 
-    print(f"Plots saved to {profile_dir}/")
+    logger.info(f"Plots saved to {profile_dir}/")
     write_json(args.json_out, results)
     if args.json_out:
-        print(f"JSON results written to {args.json_out}")
+        logger.info(f"JSON results written to {args.json_out}")
 
 
 if __name__ == '__main__':
@@ -158,13 +153,13 @@ if __name__ == '__main__':
                         help="Skip the base-model pass and the ft−base diff plot.")
     parser.add_argument('--no-cache', action='store_true',
                         help="Force re-running inference and overwrite cached parquet files.")
+    parser.add_argument('--verbose', action='store_true',
+                        help='Show detailed profiling and cache messages.')
     add_model_arg(parser)
     add_json_arg(parser)
     args = parser.parse_args()
     init_model(args)
 
-    import torch
-    from transformers import AutoModelForSequenceClassification
     from src import config
     from src.data_utils import load_splits
     from src.profiler.analysis import profile_dataframe
