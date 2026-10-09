@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu
+from src.stats.correlations import context_length_correlations
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,17 @@ def collect_run(run_dir, manifest_index):
         n = checks.get('n_profiled_samples', 0)
         flips = checks.get('n_prediction_flips_after_masking_pet', 0)
         profile_data = checks.get('profiles', {})
+        correlations = checks.get('context_length_correlations')
+        if correlations is None and profile_data.get('real_pet') and checks.get('lengths'):
+            sample_lengths = pd.DataFrame(checks['lengths'])
+            if 'context_len' not in sample_lengths:
+                sink_count = sample_lengths.get('sink_count', 2)
+                sample_lengths['context_len'] = (
+                    sample_lengths['seq_len'] - sample_lengths['pet_len'] - sink_count
+                )
+            correlations = context_length_correlations(
+                collapse_profile(profile_data['real_pet']), sample_lengths,
+            )
         entry['sanity_checks'] = {
             'n_test_samples': checks.get('n_test_samples'),
             'n_profiled_samples': n,
@@ -227,6 +239,7 @@ def collect_run(run_dir, manifest_index):
                 profile_data.get('real_pet', [])),
             'label_shuffle': label_shuffle_summary(
                 profile_data.get('real_pet', []), checks.get('n_permutations'), checks.get('seed')),
+            'context_length_correlations': correlations,
             'raw_profile_rows_omitted': {
                 key: len(value) for key, value in profile_data.items()
             },
@@ -269,6 +282,7 @@ def build_comparisons(runs):
             ]),
             'label_shuffle': [],
             'layer11_correctness': [],
+            'context_length_correlations': [],
         }
 
         for field in ('accuracy', 'macro_f1', 'weighted_f1'):
@@ -313,6 +327,7 @@ def build_comparisons(runs):
 
         control_map = {}
         correctness_map = {}
+        correlation_map = {}
         for run in members:
             sanity = run.get('sanity_checks', {})
             shuffle = sanity.get('label_shuffle')
@@ -336,6 +351,14 @@ def build_comparisons(runs):
                     correctness_map.setdefault((metric, outcome), []).append({
                         'run': run['run_name'], 'd': result.get('cohens_d'),
                     })
+            correlation_data = sanity.get('context_length_correlations') or {}
+            for result in correlation_data.get('results', []):
+                key = (result['condition'], result['layer'], result['metric'])
+                correlation_map.setdefault(key, []).append({
+                    'run': run['run_name'],
+                    'rho': result.get('spearman_rho'),
+                    'p_bh': result.get('p_bh'),
+                })
 
         for (profile_name, metric), values in sorted(control_map.items()):
             ds = [v['d'] for v in values if v['d'] is not None]
@@ -351,6 +374,19 @@ def build_comparisons(runs):
             group['layer11_correctness'].append({
                 'metric': metric, 'outcome': outcome,
                 **mean_range([v['d'] for v in values]), 'n_runs': len(values),
+            })
+        for (condition, layer, metric), values in sorted(correlation_map.items()):
+            rhos = [value['rho'] for value in values if value['rho'] is not None]
+            group['context_length_correlations'].append({
+                'condition': condition, 'layer': layer, 'metric': metric,
+                **mean_range(rhos),
+                'n_runs': len(values),
+                'positive_direction_runs': sum(rho > 0 for rho in rhos),
+                'negative_direction_runs': sum(rho < 0 for rho in rhos),
+                'fdr_significant_runs': sum(
+                    value['p_bh'] is not None and value['p_bh'] < 0.05
+                    for value in values
+                ),
             })
         comparisons.append(group)
     return comparisons
@@ -570,6 +606,27 @@ def render_plaintext(runs, comparisons, recurrence):
             ['Metric', 'Correctly classified d', 'Misclassified d'], rows,
             right_align=(1, 2),
         ))
+        if group['context_length_correlations']:
+            lines += [
+                '',
+                'CONTEXT-LENGTH / ATTENTION CORRELATIONS',
+                'Spearman rho summarized across runs; FDR significance is counted per run.',
+                '',
+            ]
+            rows = []
+            for row in group['context_length_correlations']:
+                rows.append([
+                    row['condition'], row['layer'], row['metric'],
+                    fmt_range(row, digits=3, signed=True),
+                    f"{row['positive_direction_runs']}/{row['n_runs']}",
+                    f"{row['negative_direction_runs']}/{row['n_runs']}",
+                    f"{row['fdr_significant_runs']}/{row['n_runs']}",
+                ])
+            lines.extend(render_table(
+                ['Condition', 'Layer', 'Metric', 'rho mean [range]', 'Positive',
+                 'Negative', 'FDR-significant'], rows,
+                right_align=(1, 3, 4, 5, 6),
+            ))
 
     lines += [
         '',
