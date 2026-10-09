@@ -44,5 +44,9 @@ Thumbs.db
 htmlcov/
 
 .claude
+.codex
+.agents
+.aws
+
 notes/
 output/
