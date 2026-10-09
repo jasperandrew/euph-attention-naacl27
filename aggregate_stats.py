@@ -398,135 +398,185 @@ def build_direction_recurrence(runs):
 
 def fmt_range(summary, digits=2, signed=False):
     if summary.get('mean') is None:
-        return '—'
+        return '-'
     sign = '+' if signed else ''
     return (f"{summary['mean']:{sign}.{digits}f} "
             f"[{summary['min']:{sign}.{digits}f}, {summary['max']:{sign}.{digits}f}]")
 
 
 def fmt_num(value, digits=3):
-    return f"{value:.{digits}f}" if isinstance(value, (int, float)) else '—'
+    return f"{value:.{digits}f}" if isinstance(value, (int, float)) else '-'
 
 
-def render_markdown(runs, comparisons, recurrence):
+def render_table(headers, rows, right_align=()):
+    """Render a compact table that remains legible in an unformatted text viewer."""
+    values = [[str(value) for value in row] for row in rows]
+    widths = [len(str(header)) for header in headers]
+    for row in values:
+        for index, value in enumerate(row):
+            widths[index] = max(widths[index], len(value))
+
+    def format_row(row):
+        cells = []
+        for index, value in enumerate(row):
+            cells.append(value.rjust(widths[index]) if index in right_align
+                         else value.ljust(widths[index]))
+        return '  '.join(cells).rstrip()
+
+    header = format_row([str(value) for value in headers])
+    separator = '  '.join('-' * width for width in widths).rstrip()
+    return [header, separator, *(format_row(row) for row in values)]
+
+
+def render_plaintext(runs, comparisons, recurrence):
     lines = [
-        '# Cross-run results summary',
+        'CROSS-RUN RESULTS SUMMARY',
+        '==========================',
         '',
         f"Generated from {len(runs)} run(s). Runs are summarized within each split and freeze regime; "
         'different test splits are not pooled.',
         '',
-        '## Run inventory and task performance',
+        'RUN INVENTORY AND TASK PERFORMANCE',
+        '-----------------------------------',
         '',
-        '| Split | Train seed | Frozen layers | N test | Accuracy | Macro-F1 | Stats available |',
-        '|---|---:|---:|---:|---:|---:|---|',
     ]
+    inventory_rows = []
     for run in runs:
         meta = run.get('metadata', {})
         ev = run.get('evaluation', {})
-        lines.append(
-            f"| {meta.get('split_id', run['run_name'])} | {meta.get('train_seed', '—')} "
-            f"| {meta.get('frozen_transformer_layers', '—')} | {ev.get('n_samples', '—')} "
-            f"| {fmt_num(ev.get('accuracy'))} | {fmt_num(ev.get('macro_f1'))} "
-            f"| {', '.join(name for name, ok in run['available'].items() if ok)} |"
-        )
+        inventory_rows.append([
+            meta.get('split_id', run['run_name']), meta.get('train_seed', '-'),
+            meta.get('frozen_transformer_layers', '-'), ev.get('n_samples', '-'),
+            fmt_num(ev.get('accuracy')), fmt_num(ev.get('macro_f1')),
+            ', '.join(name for name, ok in run['available'].items() if ok),
+        ])
+    lines.extend(render_table(
+        ['Split', 'Train seed', 'Frozen layers', 'N test', 'Accuracy', 'Macro-F1', 'Stats available'],
+        inventory_rows, right_align=(1, 2, 3, 4, 5),
+    ))
 
     for regime in recurrence:
         lines += [
             '',
-            f"## Direction/significance recurrence across splits (frozen layers: "
-            f"{regime['frozen_transformer_layers']})",
+            f"DIRECTION/SIGNIFICANCE RECURRENCE ACROSS SPLITS "
+            f"(FROZEN LAYERS: {regime['frozen_transformer_layers']})",
+            '-' * (51 + len(str(regime['frozen_transformer_layers']))),
             '',
             f"Descriptive counts over {len(regime['run_names'])} runs; no effect sizes or p-values "
             'are pooled across split protocols.',
             '',
-            '| Layer | Metric | Absolute d direction | Absolute significant | Fine-tuning difference direction | Difference significant |',
-            '|---:|---|---:|---:|---:|---:|',
         ]
+        rows = []
         for row in regime['rows']:
             absolute, difference = row['absolute'], row['finetuning_difference']
-            lines.append(
-                f"| {row['layer']} | {row['metric']} "
-                f"| +{absolute['positive_direction_runs']}/-{absolute['negative_direction_runs']} "
-                f"| {absolute['bonferroni_significant_runs']}/{absolute['n_runs']} "
-                f"| +{difference['positive_direction_runs']}/-{difference['negative_direction_runs']} "
-                f"| {difference['bonferroni_significant_runs']}/{difference['n_runs']} |"
-            )
+            rows.append([
+                row['layer'], row['metric'],
+                f"+{absolute['positive_direction_runs']}/-{absolute['negative_direction_runs']}",
+                f"{absolute['bonferroni_significant_runs']}/{absolute['n_runs']}",
+                f"+{difference['positive_direction_runs']}/-{difference['negative_direction_runs']}",
+                f"{difference['bonferroni_significant_runs']}/{difference['n_runs']}",
+            ])
+        lines.extend(render_table(
+            ['Layer', 'Metric', 'Absolute d direction', 'Absolute significant',
+             'Fine-tuning difference direction', 'Difference significant'],
+            rows, right_align=(0, 3, 5),
+        ))
 
     for group in comparisons:
         lines += [
             '',
-            f"## Split `{group['split_id']}`; frozen layers: {group['frozen_transformer_layers']} "
-            f"(n={group['n_runs']} training run(s))",
+            f"SPLIT {group['split_id']}; FROZEN LAYERS: {group['frozen_transformer_layers']} "
+            f"(N={group['n_runs']} TRAINING RUN(S))",
+            '=' * (39 + len(str(group['split_id'])) + len(str(group['frozen_transformer_layers']))),
             '',
-            '| Metric | Accuracy mean [range] | Macro-F1 mean [range] |',
-            '|---|---:|---:|',
-            f"| Task performance | {fmt_range(group['performance']['accuracy'], 3)} "
-            f"| {fmt_range(group['performance']['macro_f1'], 3)} |",
-            '',
-            'Layer effects are Cohen’s *d* (euphemistic − non-euphemistic), summarized as '
-            'mean [min, max] across training runs. Significance is per-run Bonferroni *p* < .05.',
-            '',
-            '| Layer | Metric | Absolute d mean [range] | Absolute sig. | Fine-tuning difference d mean [range] | Difference sig. |',
-            '|---:|---|---:|---:|---:|---:|',
         ]
+        lines.extend(render_table(
+            ['Metric', 'Accuracy mean [range]', 'Macro-F1 mean [range]'],
+            [['Task performance', fmt_range(group['performance']['accuracy'], 3),
+              fmt_range(group['performance']['macro_f1'], 3)]],
+            right_align=(1, 2),
+        ))
+        lines += [
+            '',
+            "Layer effects are Cohen's d (euphemistic - non-euphemistic), summarized as "
+            'mean [min, max] across training runs. Significance is per-run Bonferroni p < .05.',
+            '',
+        ]
+        rows = []
         for row in group['layer_effects']:
             if row['layer'] not in (10, 11, 12):
                 continue
             absolute, difference = row['absolute'], row['finetuning_difference']
-            lines.append(
-                f"| {row['layer']} | {row['metric']} | {fmt_range(absolute, signed=True)} "
-                f"| {absolute['bonferroni_significant_runs']}/{absolute['n_runs']} "
-                f"| {fmt_range(difference, signed=True)} "
-                f"| {difference['bonferroni_significant_runs']}/{difference['n_runs']} |"
-            )
+            rows.append([
+                row['layer'], row['metric'], fmt_range(absolute, signed=True),
+                f"{absolute['bonferroni_significant_runs']}/{absolute['n_runs']}",
+                fmt_range(difference, signed=True),
+                f"{difference['bonferroni_significant_runs']}/{difference['n_runs']}",
+            ])
+        lines.extend(render_table(
+            ['Layer', 'Metric', 'Absolute d mean [range]', 'Absolute sig.',
+             'Fine-tuning difference d mean [range]', 'Difference sig.'],
+            rows, right_align=(0, 2, 3, 4, 5),
+        ))
 
         lines += [
             '',
             f"PET-mask prediction-flip rate: {fmt_range(group['prediction_flip_rate'], 3)}.",
             '',
-            '| Label-shuffle control | Mean significant tests / permutation | Max | Layer-11-hit permutations | Real layer-11 metrics significant |',
-            '|---|---:|---:|---:|---:|',
         ]
+        rows = []
         for shuffle in group['label_shuffle']:
-            lines.append(
-                f"| {shuffle['run']} | {shuffle['mean_significant_tests']:.2f} "
-                f"| {shuffle['max_significant_tests']} "
-                f"| {shuffle['permutations_with_layer11_significance']}/{shuffle['n_permutations']} "
-                f"| {shuffle['real_layer11_significant_metrics']}/6 |"
-            )
+            rows.append([
+                shuffle['run'], f"{shuffle['mean_significant_tests']:.2f}",
+                shuffle['max_significant_tests'],
+                f"{shuffle['permutations_with_layer11_significance']}/{shuffle['n_permutations']}",
+                f"{shuffle['real_layer11_significant_metrics']}/6",
+            ])
+        lines.extend(render_table(
+            ['Label-shuffle control', 'Mean significant tests / permutation', 'Max',
+             'Layer-11-hit permutations', 'Real layer-11 metrics significant'],
+            rows, right_align=(1, 2, 3, 4),
+        ))
         lines += [
             '',
-            '| Layer-11 control | Metric | Cohen’s d mean [range] | Bonferroni-significant runs |',
-            '|---|---|---:|---:|',
         ]
+        rows = []
         for row in group['layer11_controls']:
             if row['profile'] in ('masked_pet', 'random_span'):
-                lines.append(
-                    f"| {row['profile']} | {row['metric']} | {fmt_range(row, signed=True)} "
-                    f"| {row['bonferroni_significant_runs']}/{row['n_runs']} |"
-                )
+                rows.append([
+                    row['profile'], row['metric'], fmt_range(row, signed=True),
+                    f"{row['bonferroni_significant_runs']}/{row['n_runs']}",
+                ])
+        lines.extend(render_table(
+            ['Layer-11 control', 'Metric', "Cohen's d mean [range]", 'Bonferroni-significant runs'],
+            rows, right_align=(2, 3),
+        ))
         lines += [
             '',
-            '| Metric | Correctly classified d | Misclassified d |',
-            '|---|---:|---:|',
         ]
         correct = {r['metric']: r for r in group['layer11_correctness'] if r['outcome'] == 'correct'}
         incorrect = {r['metric']: r for r in group['layer11_correctness'] if r['outcome'] == 'misclassified'}
+        rows = []
         for metric in ('Inward (Context → PET)', 'Internal (PET → PET)', 'Sink (PET → Sink)'):
             if metric in correct or metric in incorrect:
-                lines.append(
-                    f"| {metric} | {fmt_range(correct.get(metric, {}), signed=True)} "
-                    f"| {fmt_range(incorrect.get(metric, {}), signed=True)} |"
-                )
+                rows.append([
+                    metric, fmt_range(correct.get(metric, {}), signed=True),
+                    fmt_range(incorrect.get(metric, {}), signed=True),
+                ])
+        lines.extend(render_table(
+            ['Metric', 'Correctly classified d', 'Misclassified d'], rows,
+            right_align=(1, 2),
+        ))
 
     lines += [
         '',
-        '## Interpretation notes',
+        'INTERPRETATION NOTES',
+        '--------------------',
         '',
-        '- Ranges describe observed run-to-run variation; with few runs they are not confidence intervals.',
-        '- Effects are summarized within matching split/freeze groups, not averaged across distinct splits.',
-        '- Layer 10–12 are shown above; the JSON output retains the summaries for every layer.',
-        '- Label-shuffle outcomes are recomputed from saved real-PET profiles using each run’s recorded seed.',
+        'Ranges describe observed run-to-run variation; with few runs they are not confidence intervals.',
+        'Effects are summarized within matching split/freeze groups, not averaged across distinct splits.',
+        'Layers 10-12 are shown above; the JSON output retains the summaries for every layer.',
+        "Label-shuffle outcomes are recomputed from saved real-PET profiles using each run's recorded seed.",
         '',
     ]
     return '\n'.join(lines)
@@ -541,12 +591,12 @@ def main():
                         help='Directory containing one subdirectory per run.')
     parser.add_argument('--output-json', type=Path, default=None,
                         help='Structured summary JSON (default: <stats-dir>/aggregate_summary.json).')
-    parser.add_argument('--output-md', type=Path, default=None,
-                        help='Paper-facing Markdown report (default: <stats-dir>/aggregate_summary.md).')
+    parser.add_argument('--output-txt', type=Path, default=None,
+                        help='Plain-text report (default: <stats-dir>/aggregate_summary.txt).')
     args = parser.parse_args()
     stats_dir = args.stats_dir.expanduser().resolve()
     output_json = args.output_json.expanduser().resolve() if args.output_json else stats_dir / 'aggregate_summary.json'
-    output_md = args.output_md.expanduser().resolve() if args.output_md else stats_dir / 'aggregate_summary.md'
+    output_txt = args.output_txt.expanduser().resolve() if args.output_txt else stats_dir / 'aggregate_summary.txt'
 
     run_root = root / 'runs'
     manifest_index = {}
@@ -582,9 +632,9 @@ def main():
     with output_json.open('w', encoding='utf-8') as f:
         json.dump(aggregate, f, indent=2, ensure_ascii=False, allow_nan=False)
         f.write('\n')
-    output_md.parent.mkdir(parents=True, exist_ok=True)
-    output_md.write_text(render_markdown(runs, comparisons, recurrence), encoding='utf-8')
-    print(f"Summarized {len(runs)} run(s) to:\n  {output_md}\n  {output_json}")
+    output_txt.parent.mkdir(parents=True, exist_ok=True)
+    output_txt.write_text(render_plaintext(runs, comparisons, recurrence), encoding='utf-8')
+    print(f"Summarized {len(runs)} run(s) to:\n  {output_txt}\n  {output_json}")
 
 
 if __name__ == '__main__':
