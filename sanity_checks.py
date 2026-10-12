@@ -262,7 +262,7 @@ def check_context_length_correlations(per_sample, lengths):
 
 
 def check_context_length_adjustment(per_sample, lengths):
-    """Create per-sample inward/outward values standardized to mean context length."""
+    """Create per-sample selected attention values standardized to mean context length."""
     return context_length_adjusted_attention(per_sample, lengths)
 
 

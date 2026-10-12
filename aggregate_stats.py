@@ -9,7 +9,10 @@ import pandas as pd
 from scipy.stats import mannwhitneyu
 from src.stats.profiling import METRIC_COLUMNS
 from src.stats.correlations import (
+    FULL_ATTENTION_TEST_FAMILY_SIZE,
+    LENGTH_ADJUSTED_METRICS,
     context_length_adjusted_attention,
+    context_length_adjusted_tests,
     context_length_correlations,
 )
 
@@ -230,13 +233,24 @@ def collect_run(run_dir, manifest_index):
             sample_lengths['context_len'] = (
                 sample_lengths['seq_len'] - sample_lengths['pet_len'] - sink_count
             )
-        if correlations is None and profile_data.get('real_pet') and checks.get('lengths'):
+        if profile_data.get('real_pet') and not sample_lengths.empty:
+            # Recompute from saved sample profiles so newer metric selections
+            # (including PET-internal flow) are reflected without inference.
             correlations = context_length_correlations(
                 collapse_profile(profile_data['real_pet']), sample_lengths,
             )
-        if context_adjustment is None and profile_data.get('real_pet') and not sample_lengths.empty:
             context_adjustment = context_length_adjusted_attention(
                 collapse_profile(profile_data['real_pet']), sample_lengths,
+            )
+        if context_adjustment is not None and 'class_effect_tests' not in context_adjustment:
+            context_adjustment = dict(context_adjustment)
+            context_adjustment['class_effect_tests'] = context_length_adjusted_tests(
+                context_adjustment.get('data_points', []),
+                bonferroni_tests=FULL_ATTENTION_TEST_FAMILY_SIZE,
+            )
+            context_adjustment['multiple_testing_correction'] = (
+                'Bonferroni across the existing 8-metric × 12-layer family '
+                f'({FULL_ATTENTION_TEST_FAMILY_SIZE} tests per run)'
             )
         entry['sanity_checks'] = {
             'n_test_samples': checks.get('n_test_samples'),
@@ -379,9 +393,12 @@ def build_comparisons(runs):
                 })
             adjustment_data = sanity.get('context_length_adjustment') or {}
             points = adjustment_data.get('data_points', [])
+            adjusted_tests = {
+                (test['layer'], test['metric']): test
+                for test in adjustment_data.get('class_effect_tests', [])
+            }
             for layer in sorted({point['layer'] for point in points}):
-                for metric in ('Inward (Context → PET)', 'Outward (PET → Context)',
-                               'Sink (Sink → PET)', 'All (All → PET)'):
+                for metric in LENGTH_ADJUSTED_METRICS:
                     metric_points = [point for point in points
                                      if point['layer'] == layer and point['metric'] == metric]
                     raw_e = [p['raw_value'] for p in metric_points
@@ -397,6 +414,7 @@ def build_comparisons(runs):
                         'run': run['run_name'],
                         'raw_d': cohens_d(raw_e, raw_n),
                         'adjusted_d': cohens_d(adj_e, adj_n),
+                        'class_effect_test': adjusted_tests.get(key),
                     })
 
         for (profile_name, metric), values in sorted(control_map.items()):
@@ -430,10 +448,19 @@ def build_comparisons(runs):
         for (layer, metric), values in sorted(adjustment_map.items()):
             raw_ds = [value['raw_d'] for value in values if value['raw_d'] is not None]
             adjusted_ds = [value['adjusted_d'] for value in values if value['adjusted_d'] is not None]
+            tests = [value['class_effect_test'] for value in values
+                     if value['class_effect_test'] is not None]
             group['context_length_adjustment'].append({
                 'layer': layer, 'metric': metric, 'n_runs': len(values),
                 'raw_d': mean_range(raw_ds),
                 'length_adjusted_d': mean_range(adjusted_ds),
+                'adjusted_mean_difference': mean_range([
+                    test['adjusted_mean_difference'] for test in tests
+                ]),
+                'bonferroni_significant_runs': sum(
+                    test['p_bonferroni'] < 0.05 for test in tests
+                ),
+                'n_tested_runs': len(tests),
             })
         comparisons.append(group)
     return comparisons
@@ -681,7 +708,9 @@ def render_plaintext(runs, comparisons, recurrence):
                 '',
                 'CONTEXT-LENGTH-ADJUSTED ATTENTION EFFECTS',
                 'Cohen\'s d across conditions before and after linear adjustment to the run mean context length.',
-                'Positive d means greater Euphemistic attention; these are descriptive, not new significance tests.',
+                'Significance tests the class coefficient in attention ~ class + context length using HC3 robust OLS.',
+                f"Per-run Bonferroni correction uses the existing {FULL_ATTENTION_TEST_FAMILY_SIZE}-test family.",
+                'Positive d and adjusted mean difference indicate greater Euphemistic attention.',
                 '',
             ]
             rows = []
@@ -695,12 +724,13 @@ def render_plaintext(runs, comparisons, recurrence):
                     row['layer'], row['metric'], fmt_range(raw, digits=3, signed=True),
                     fmt_range(adjusted, digits=3, signed=True),
                     '-' if delta is None else f'{delta:+.3f}',
-                    row['n_runs'],
+                    fmt_range(row['adjusted_mean_difference'], digits=4, signed=True),
+                    f"{row['bonferroni_significant_runs']}/{row['n_tested_runs']}",
                 ])
             lines.extend(render_table(
                 ['Layer', 'Metric', 'Raw d mean [range]', 'Adjusted d mean [range]',
-                 'Δ mean d', 'Runs'], rows,
-                right_align=(0, 2, 3, 4, 5),
+                 'Δ mean d', 'Adjusted mean diff.', 'Adjusted sig.'], rows,
+                right_align=(0, 2, 3, 4, 5, 6),
             ))
 
     lines += [

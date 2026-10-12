@@ -6,6 +6,13 @@ import scipy.stats
 from sklearn.linear_model import LinearRegression
 
 
+LENGTH_ADJUSTED_METRICS = (
+    'Inward (Context → PET)', 'Outward (PET → Context)',
+    'Internal (PET → PET)', 'Sink (Sink → PET)', 'All (All → PET)',
+)
+FULL_ATTENTION_TEST_FAMILY_SIZE = 8 * 12
+
+
 def benjamini_hochberg(p_values):
     """Return Benjamini-Hochberg adjusted p-values, preserving input order."""
     p_values = np.asarray(p_values, dtype=float)
@@ -32,10 +39,8 @@ def context_length_correlations(per_sample, lengths):
     samples = per_sample.merge(
         lengths[['sample_id', 'context_len']], on='sample_id', validate='many_to_one',
     )
-    metrics = tuple(metric for metric in (
-        'Inward (Context → PET)', 'Outward (PET → Context)',
-        'Sink (Sink → PET)', 'All (All → PET)',
-    ) if metric in samples.columns)
+    metrics = tuple(metric for metric in LENGTH_ADJUSTED_METRICS
+                    if metric in samples.columns)
     layers = sorted(int(layer) for layer in per_sample['Layer'].unique())
     results = []
     for condition in ('Euphemistic', 'Non-Euphemistic'):
@@ -86,10 +91,8 @@ def context_length_adjusted_attention(per_sample, lengths):
     samples = per_sample.merge(
         lengths[['sample_id', 'context_len']], on='sample_id', validate='many_to_one',
     )
-    metrics = tuple(metric for metric in (
-        'Inward (Context → PET)', 'Outward (PET → Context)',
-        'Sink (Sink → PET)', 'All (All → PET)',
-    ) if metric in samples.columns)
+    metrics = tuple(metric for metric in LENGTH_ADJUSTED_METRICS
+                    if metric in samples.columns)
     results = []
     datapoints = []
     for layer in sorted(int(value) for value in samples['Layer'].unique()):
@@ -135,11 +138,96 @@ def context_length_adjusted_attention(per_sample, lengths):
                     'context_length_slope': beta,
                 })
 
-    return {
+    adjustment = {
         'method': 'Pooled linear context-length adjustment with condition intercepts',
         'adjustment': 'value - shared_context_length_slope * (context_len - run_mean_context_len)',
         'reference': 'run mean context length',
         'metrics': list(metrics),
+        'multiple_testing_correction': (
+            'Bonferroni across the existing 8-metric × 12-layer family '
+            f'({FULL_ATTENTION_TEST_FAMILY_SIZE} tests per run)'
+        ),
         'results': results,
         'data_points': datapoints,
     }
+    adjustment['class_effect_tests'] = context_length_adjusted_tests(
+        datapoints, bonferroni_tests=FULL_ATTENTION_TEST_FAMILY_SIZE,
+    )
+    return adjustment
+
+
+def _length_adjusted_class_test(values, conditions, context_lengths,
+                                bonferroni_tests):
+    """Test the class coefficient in attention ~ class + context length.
+
+    Uses an HC3 heteroskedasticity-robust OLS standard error. This tests the
+    adjusted class contrast while retaining the common context-length slope
+    used by ``context_length_adjusted_attention``.
+    """
+    y = np.asarray(values, dtype=float)
+    condition = np.asarray(conditions, dtype=float)
+    context = np.asarray(context_lengths, dtype=float)
+    finite = np.isfinite(y) & np.isfinite(condition) & np.isfinite(context)
+    y, condition, context = y[finite], condition[finite], context[finite]
+    n = len(y)
+    if (n <= 3 or np.unique(condition).size != 2 or
+            np.unique(context).size < 2):
+        return None
+
+    centered_context = context - context.mean()
+    design = np.column_stack((np.ones(n), condition, centered_context))
+    try:
+        bread = np.linalg.inv(design.T @ design)
+    except np.linalg.LinAlgError:
+        return None
+    coefficients = bread @ design.T @ y
+    residuals = y - design @ coefficients
+    leverage = np.einsum('ij,jk,ik->i', design, bread, design)
+    if np.any(1.0 - leverage <= np.finfo(float).eps):
+        return None
+
+    hc3_residuals = residuals / (1.0 - leverage)
+    scores = design * hc3_residuals[:, None]
+    covariance = bread @ (scores.T @ scores) @ bread
+    standard_error = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    coefficient = float(coefficients[1])
+    if not np.isfinite(standard_error) or standard_error <= 0:
+        p_raw = 1.0 if coefficient == 0 else 0.0
+        statistic = None
+    else:
+        statistic = coefficient / standard_error
+        p_raw = float(2.0 * scipy.stats.t.sf(abs(statistic), df=n - 3))
+    p_bonferroni = min(p_raw * bonferroni_tests, 1.0)
+    return {
+        'n_euphemistic': int(np.sum(condition == 1)),
+        'n_non_euphemistic': int(np.sum(condition == 0)),
+        'adjusted_mean_difference': coefficient,
+        'hc3_standard_error': standard_error,
+        't_statistic': float(statistic) if statistic is not None else None,
+        'degrees_of_freedom': n - 3,
+        'p_raw': p_raw,
+        'p_bonferroni': p_bonferroni,
+        'significant_bonferroni_0_05': p_bonferroni < 0.05,
+    }
+
+
+def context_length_adjusted_tests(data_points, bonferroni_tests=FULL_ATTENTION_TEST_FAMILY_SIZE):
+    """Test per-layer adjusted class differences from saved adjustment points."""
+    points = pd.DataFrame(data_points)
+    if points.empty:
+        return []
+    results = []
+    for (layer, metric), group in points.groupby(['layer', 'metric'], sort=True):
+        conditions = (group['condition'] == 'Euphemistic').to_numpy(dtype=float)
+        test = _length_adjusted_class_test(
+            group['raw_value'].to_numpy(dtype=float), conditions,
+            group['context_len'].to_numpy(dtype=float), bonferroni_tests,
+        )
+        if test is not None:
+            results.append({
+                'layer': int(layer), 'metric': metric,
+                'test': 'HC3 robust OLS class coefficient; attention ~ class + context length',
+                'n_bonferroni_tests': int(bonferroni_tests),
+                **test,
+            })
+    return results
