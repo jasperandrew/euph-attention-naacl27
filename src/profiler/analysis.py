@@ -25,7 +25,6 @@ def profile_single_sample(model, text, pet_phrase, sink_tokens=('<s>', '</s>')):
       Entropy                 : mean outward entropy (dispersion of PET rows)
       Sink (PET → Sink)       : fraction of PET attention going to <s>/</s>
       Sink (Sink → PET)       : mean sink-token attention directed to PET tokens
-      All (All → PET)         : mean attention from all non-padding queries to PET tokens
       Distance           : expected token distance PET attends over
       Head Variance           : variance across heads (layer-level, duplicated per row)
 

@@ -4,6 +4,8 @@ Plotting functions for the single-sentence attention profiler.
 Takes the aggregated DataFrame produced by profiler.analysis.profile_dataframe
 and renders summary plots across layers and conditions.
 """
+from pathlib import Path
+
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,14 +35,13 @@ _PROFILE_METRICS = [
     'Internal (PET → PET)',
     'Sink (PET → Sink)',
     'Sink (Sink → PET)',
-    'All (All → PET)',
     'Inward (Context → PET)',
     'Entropy',
     'Distance',
 ]
 
 _PROFILE_METRIC_LABELS = [
-    'Outward', 'Internal', 'PET→Sink', 'Sink→PET', 'All→PET', 'Inward', 'Entropy', 'Distance',
+    'Outward', 'Internal', 'PET→Sink', 'Sink→PET', 'Inward', 'Entropy', 'Distance',
 ]
 
 # Heads that are polyfunctional-and-leading at layer 11 (H3, H7, H11)
@@ -334,6 +335,84 @@ def plot_layer11_lollipop(df, output_dir=None):
         ax.set_xlabel("Cohen's $d$")
     plt.tight_layout()
     _save_or_show(fig, output_dir, 'layer11_per_head_d_lollipop.png')
+
+
+def plot_layer10_11_per_head_d(run_effects, output_path):
+    """Plot run-aggregated per-head class effects for layers 10 and 11.
+
+    ``run_effects`` contains one Cohen's d per run, layer, metric, and head.
+    Dots show the mean across runs and gray endcaps mark the run-level range.
+    """
+    from matplotlib.lines import Line2D
+
+    layers = (10, 11)
+    metrics = (
+        ('Internal (PET → PET)', 'Internal'),
+        ('Inward (Context → PET)', 'Inward'),
+        ('Outward (PET → Context)', 'Outward'),
+    )
+    pos_color, neg_color = '#c0392b', '#2471a3'
+    range_color = '#5f6368'
+
+    selected = run_effects[
+        run_effects['layer'].isin(layers) & run_effects['metric'].isin(m for m, _ in metrics)
+    ]
+    heads = sorted(selected['head'].unique())
+    if not heads:
+        raise ValueError('No layer-10/11 per-head effects found')
+
+    grouped = selected.groupby(['layer', 'metric', 'head'])['cohens_d']
+    means = grouped.mean()
+    minima = grouped.min()
+    maxima = grouped.max()
+    limit = max(abs(minima.min()), abs(maxima.max()))
+    limit = np.ceil(limit * 4) / 4 + 0.1
+
+    fig, axes = plt.subplots(2, 3, figsize=(12, 7), sharex=True, sharey=True)
+    y = np.arange(len(heads))
+    for row, layer in enumerate(layers):
+        for col, (metric, label) in enumerate(metrics):
+            ax = axes[row, col]
+            for y_pos, head in zip(y, heads):
+                key = (layer, metric, head)
+                mean_d = means.loc[key]
+                low, high = minima.loc[key], maxima.loc[key]
+                color = pos_color if mean_d >= 0 else neg_color
+                ax.hlines(y_pos, low, high, color=range_color, lw=1.0,
+                          alpha=0.8, zorder=1)
+                ax.vlines([low, high], y_pos - 0.07, y_pos + 0.07,
+                          color=range_color, lw=1.0, alpha=0.8, zorder=1)
+                ax.plot(mean_d, y_pos, 'o', color=color, ms=6,
+                        markeredgecolor='white', markeredgewidth=0.5, zorder=3)
+
+            ax.axvline(0, color='black', lw=0.7, alpha=0.7)
+            ax.set_yticks(y)
+            ax.set_yticklabels([f'H{head}' for head in heads])
+            ax.invert_yaxis()
+            ax.set_xlim(-limit, limit)
+            ax.set_title(label, fontsize=11, pad=4)
+            ax.grid(axis='x', alpha=0.25)
+            ax.set_axisbelow(True)
+            if col == 0:
+                ax.set_ylabel(f'Layer {layer}', fontsize=12)
+
+    fig.supxlabel("Cohen's $d$ (Euph. $-$ Non-Euph.)", y=0.10)
+    legend = [
+        Line2D([0], [0], color=pos_color, marker='o', linestyle='None',
+               label='Positive mean $d$'),
+        Line2D([0], [0], color=neg_color, marker='o', linestyle='None',
+               label='Negative mean $d$'),
+        Line2D([0, 1], [0, 0], color=range_color, marker='|', markersize=8,
+               lw=1.0, label='Run-level min–max'),
+    ]
+    fig.legend(handles=legend, loc='upper center', ncol=3, frameon=False,
+               bbox_to_anchor=(0.5, 0.99))
+    fig.tight_layout(rect=[0, 0.09, 1, 0.96])
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Wrote {output_path}')
 
 
 def plot_correct_vs_misclassified(df, output_dir=None):

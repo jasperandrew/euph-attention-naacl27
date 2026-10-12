@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu
+from src import config
 from src.stats.profiling import METRIC_COLUMNS
 from src.stats.correlations import (
     FULL_ATTENTION_TEST_FAMILY_SIZE,
@@ -71,15 +72,19 @@ def control_effects(rows):
     if ps.empty:
         return {}
     n_layers = int(ps['Layer'].max())
-    ps = ps[ps['Layer'] == 11]
-    out = {}
     available_metrics = [metric for metric in METRICS if metric in ps.columns]
-    for metric in available_metrics:
-        e = ps.loc[ps['Condition'] == 'Euphemistic', metric].tolist()
-        n = ps.loc[ps['Condition'] == 'Non-Euphemistic', metric].tolist()
-        out[metric] = effect(
-            e, n, bonferroni_tests=len(available_metrics) * n_layers,
-        )
+    out = {}
+    for layer in (10, 11):
+        layer_ps = ps[ps['Layer'] == layer]
+        if layer_ps.empty:
+            continue
+        out[layer] = {}
+        for metric in available_metrics:
+            e = layer_ps.loc[layer_ps['Condition'] == 'Euphemistic', metric].tolist()
+            n = layer_ps.loc[layer_ps['Condition'] == 'Non-Euphemistic', metric].tolist()
+            out[layer][metric] = effect(
+                e, n, bonferroni_tests=len(available_metrics) * n_layers,
+            )
     return out
 
 
@@ -172,6 +177,82 @@ def compact_evaluation(data):
     }
 
 
+def compact_significance(data):
+    """Drop retired metrics and reapply Bonferroni using the current family."""
+    significance = dict(data)
+    results = dict(significance.get('results') or {})
+    layer_family = len(METRICS) * config.NUM_LAYERS
+    head_family = len(METRICS) * config.NUM_HEADS
+
+    for result_name in (
+        'layer_condition_means', 'finetuned_layer_tests', 'finetuned_head_tests',
+        'base_vs_finetuned', 'finetuning_difference_tests',
+    ):
+        filtered = []
+        for source in results.get(result_name, []):
+            if source.get('metric') not in METRICS:
+                continue
+            row = dict(source)
+            if result_name in ('finetuned_layer_tests', 'finetuning_difference_tests'):
+                p = row.get('p_raw')
+                if p is not None:
+                    row['p_bonferroni'] = min(float(p) * layer_family, 1.0)
+                    row['significant_bonferroni_0_05'] = row['p_bonferroni'] < 0.05
+            elif result_name == 'finetuned_head_tests':
+                p = row.get('p_raw')
+                if p is not None:
+                    row['p_bonferroni'] = min(float(p) * head_family, 1.0)
+                    row['significant_bonferroni_0_05'] = row['p_bonferroni'] < 0.05
+            filtered.append(row)
+        if result_name in results:
+            results[result_name] = filtered
+
+    # Recompute this descriptive contrast from saved profiles below because
+    # older significance files do not retain its raw p-values.
+    results.pop('base_vs_finetuned', None)
+    significance['results'] = results
+    significance['metrics'] = list(METRICS)
+    significance['bonferroni'] = {
+        'alpha': 0.05,
+        'layer_tests': layer_family,
+        'head_tests': head_family,
+    }
+    return significance
+
+
+def base_vs_finetuned_tests(ft_rows, base_rows):
+    """Recompute base/finetuned class contrasts from cached per-sample profiles."""
+    ft = collapse_profile(ft_rows)
+    base = collapse_profile(base_rows)
+    if ft.empty or base.empty:
+        return []
+    family_size = len(METRICS) * config.NUM_LAYERS
+    tests = []
+    for layer in range(1, config.NUM_LAYERS + 1):
+        for metric in METRICS:
+            ft_layer = ft[ft['Layer'] == layer]
+            base_layer = base[base['Layer'] == layer]
+            ft_e = ft_layer.loc[ft_layer['Condition'] == 'Euphemistic', metric].to_numpy()
+            ft_n = ft_layer.loc[ft_layer['Condition'] == 'Non-Euphemistic', metric].to_numpy()
+            base_e = base_layer.loc[base_layer['Condition'] == 'Euphemistic', metric].to_numpy()
+            base_n = base_layer.loc[base_layer['Condition'] == 'Non-Euphemistic', metric].to_numpy()
+            if not all(len(values) for values in (ft_e, ft_n, base_e, base_n)):
+                continue
+            p_base = float(mannwhitneyu(base_e, base_n, alternative='two-sided').pvalue)
+            p_ft = float(mannwhitneyu(ft_e, ft_n, alternative='two-sided').pvalue)
+            d_base, d_ft = cohens_d(base_e, base_n), cohens_d(ft_e, ft_n)
+            tests.append({
+                'layer': layer,
+                'metric': metric,
+                'cohens_d_base': d_base,
+                'cohens_d_finetuned': d_ft,
+                'delta_cohens_d': d_ft - d_base if d_base is not None and d_ft is not None else None,
+                'p_base_bonferroni': min(p_base * family_size, 1.0),
+                'p_finetuned_bonferroni': min(p_ft * family_size, 1.0),
+            })
+    return tests
+
+
 def collect_run(run_dir, manifest_index):
     files = {name: run_dir / f'{name}.json'
              for name in ('evaluate', 'significance', 'sanity_checks')}
@@ -214,17 +295,18 @@ def collect_run(run_dir, manifest_index):
 
     if available['significance']:
         significance = read_json(files['significance'])
-        entry['significance'] = {
-            'n_test_samples': significance.get('n_test_samples'),
-            'bonferroni': significance.get('bonferroni'),
-            'results': significance.get('results'),
-        }
+        entry['significance'] = compact_significance(significance)
+        entry['significance']['n_test_samples'] = significance.get('n_test_samples')
 
     if available['sanity_checks']:
         checks = read_json(files['sanity_checks'])
         n = checks.get('n_profiled_samples', 0)
         flips = checks.get('n_prediction_flips_after_masking_pet', 0)
         profile_data = checks.get('profiles', {})
+        if 'significance' in entry and profile_data.get('real_pet') and profile_data.get('base_real_pet'):
+            entry['significance']['results']['base_vs_finetuned'] = base_vs_finetuned_tests(
+                profile_data['real_pet'], profile_data['base_real_pet'],
+            )
         correlations = checks.get('context_length_correlations')
         context_adjustment = checks.get('context_length_adjustment')
         sample_lengths = pd.DataFrame(checks['lengths']) if checks.get('lengths') else pd.DataFrame()
@@ -249,7 +331,7 @@ def collect_run(run_dir, manifest_index):
                 bonferroni_tests=FULL_ATTENTION_TEST_FAMILY_SIZE,
             )
             context_adjustment['multiple_testing_correction'] = (
-                'Bonferroni across the existing 8-metric × 12-layer family '
+                'Bonferroni across the existing 7-metric × 12-layer family '
                 f'({FULL_ATTENTION_TEST_FAMILY_SIZE} tests per run)'
             )
         entry['sanity_checks'] = {
@@ -259,7 +341,7 @@ def collect_run(run_dir, manifest_index):
             'prediction_flip_rate': flips / n if n else None,
             'seed': checks.get('seed'),
             'n_permutations': checks.get('n_permutations'),
-            'layer11_control_effects': {
+            'layer10_11_control_effects': {
                 key: control_effects(profile_data[key])
                 for key in PROFILE_KEYS if key in profile_data
             },
@@ -305,7 +387,7 @@ def build_comparisons(runs):
             'n_runs': len(members),
             'performance': {},
             'layer_effects': [],
-            'layer11_controls': [],
+            'attention_controls': [],
             'prediction_flip_rate': mean_range([
                 run.get('sanity_checks', {}).get('prediction_flip_rate') for run in members
             ]),
@@ -372,12 +454,13 @@ def build_comparisons(runs):
                     'n_metrics': shuffle.get('n_metrics'),
                     'real_layer11_significant_metrics': shuffle['real_layer11_significant_metrics'],
                 })
-            for profile_name, metrics in sanity.get('layer11_control_effects', {}).items():
-                for metric, result in metrics.items():
-                    control_map.setdefault((profile_name, metric), []).append({
-                        'run': run['run_name'], 'd': result.get('cohens_d'),
-                        'p_bonferroni': result.get('p_bonferroni'),
-                    })
+            for profile_name, layers in sanity.get('layer10_11_control_effects', {}).items():
+                for layer, metrics in layers.items():
+                    for metric, result in metrics.items():
+                        control_map.setdefault((profile_name, int(layer), metric), []).append({
+                            'run': run['run_name'], 'd': result.get('cohens_d'),
+                            'p_bonferroni': result.get('p_bonferroni'),
+                        })
             for metric, outcomes in sanity.get('layer11_correctness_effects', {}).items():
                 for outcome, result in outcomes.items():
                     correctness_map.setdefault((metric, outcome), []).append({
@@ -417,10 +500,10 @@ def build_comparisons(runs):
                         'class_effect_test': adjusted_tests.get(key),
                     })
 
-        for (profile_name, metric), values in sorted(control_map.items()):
+        for (profile_name, layer, metric), values in sorted(control_map.items()):
             ds = [v['d'] for v in values if v['d'] is not None]
-            group['layer11_controls'].append({
-                'profile': profile_name, 'metric': metric,
+            group['attention_controls'].append({
+                'profile': profile_name, 'layer': layer, 'metric': metric,
                 **mean_range(ds), 'n_runs': len(values),
                 'bonferroni_significant_runs': sum(
                     v['p_bonferroni'] is not None and v['p_bonferroni'] < 0.05
@@ -654,15 +737,17 @@ def render_plaintext(runs, comparisons, recurrence):
             '',
         ]
         rows = []
-        for row in group['layer11_controls']:
+        for row in group['attention_controls']:
             if row['profile'] in ('masked_pet', 'random_span'):
                 rows.append([
-                    row['profile'], row['metric'], fmt_range(row, signed=True),
+                    row['profile'], row['layer'], row['metric'],
+                    fmt_range(row, signed=True),
                     f"{row['bonferroni_significant_runs']}/{row['n_runs']}",
                 ])
         lines.extend(render_table(
-            ['Layer-11 control', 'Metric', "Cohen's d mean [range]", 'Bonferroni-significant runs'],
-            rows, right_align=(2, 3),
+            ['Attention control', 'Layer', 'Metric', "Cohen's d mean [range]",
+             'Bonferroni-significant runs'],
+            rows, right_align=(1, 3, 4),
         ))
         lines += [
             '',
@@ -671,8 +756,7 @@ def render_plaintext(runs, comparisons, recurrence):
         incorrect = {r['metric']: r for r in group['layer11_correctness'] if r['outcome'] == 'misclassified'}
         rows = []
         for metric in ('Inward (Context → PET)', 'Internal (PET → PET)',
-                       'Sink (PET → Sink)', 'Sink (Sink → PET)',
-                       'All (All → PET)'):
+                       'Sink (PET → Sink)', 'Sink (Sink → PET)'):
             if metric in correct or metric in incorrect:
                 rows.append([
                     metric, fmt_range(correct.get(metric, {}), signed=True),

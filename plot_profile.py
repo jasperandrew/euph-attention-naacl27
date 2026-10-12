@@ -31,7 +31,6 @@ _METRIC_COLS = [
     'Internal (PET → PET)',
     'Sink (PET → Sink)',
     'Sink (Sink → PET)',
-    'All (All → PET)',
     'Inward (Context → PET)',
     'Entropy',
     'Distance',

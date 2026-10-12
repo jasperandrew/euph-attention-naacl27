@@ -5,12 +5,14 @@ import pandas as pd
 import scipy.stats
 from sklearn.linear_model import LinearRegression
 
+from .profiling import METRIC_COLUMNS
+
 
 LENGTH_ADJUSTED_METRICS = (
     'Inward (Context → PET)', 'Outward (PET → Context)',
-    'Internal (PET → PET)', 'Sink (Sink → PET)', 'All (All → PET)',
+    'Internal (PET → PET)', 'Sink (Sink → PET)',
 )
-FULL_ATTENTION_TEST_FAMILY_SIZE = 8 * 12
+FULL_ATTENTION_TEST_FAMILY_SIZE = len(METRIC_COLUMNS) * 12
 
 
 def benjamini_hochberg(p_values):
@@ -144,7 +146,7 @@ def context_length_adjusted_attention(per_sample, lengths):
         'reference': 'run mean context length',
         'metrics': list(metrics),
         'multiple_testing_correction': (
-            'Bonferroni across the existing 8-metric × 12-layer family '
+            'Bonferroni across the existing 7-metric × 12-layer family '
             f'({FULL_ATTENTION_TEST_FAMILY_SIZE} tests per run)'
         ),
         'results': results,
