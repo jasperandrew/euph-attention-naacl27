@@ -84,6 +84,11 @@ Meeting Notes
 - story with examples. why is inward/internal attn increasing? why not outward?
 - pet-only classification
 
+- normalize attention for context length
+- check outward+internal+sink=PET attn mass
+- check ft-base difference calculation
+- variance, SD across runs
+
 # Other TODOs
 
 ## 1. `FROZEN_LAYERS` is global but should be per-model
