@@ -7,7 +7,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu
-from src.stats.correlations import context_length_correlations
+from src.stats.correlations import (
+    context_length_adjusted_attention,
+    context_length_correlations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,14 +217,19 @@ def collect_run(run_dir, manifest_index):
         flips = checks.get('n_prediction_flips_after_masking_pet', 0)
         profile_data = checks.get('profiles', {})
         correlations = checks.get('context_length_correlations')
+        context_adjustment = checks.get('context_length_adjustment')
+        sample_lengths = pd.DataFrame(checks['lengths']) if checks.get('lengths') else pd.DataFrame()
+        if not sample_lengths.empty and 'context_len' not in sample_lengths:
+            sink_count = sample_lengths.get('sink_count', 2)
+            sample_lengths['context_len'] = (
+                sample_lengths['seq_len'] - sample_lengths['pet_len'] - sink_count
+            )
         if correlations is None and profile_data.get('real_pet') and checks.get('lengths'):
-            sample_lengths = pd.DataFrame(checks['lengths'])
-            if 'context_len' not in sample_lengths:
-                sink_count = sample_lengths.get('sink_count', 2)
-                sample_lengths['context_len'] = (
-                    sample_lengths['seq_len'] - sample_lengths['pet_len'] - sink_count
-                )
             correlations = context_length_correlations(
+                collapse_profile(profile_data['real_pet']), sample_lengths,
+            )
+        if context_adjustment is None and profile_data.get('real_pet') and not sample_lengths.empty:
+            context_adjustment = context_length_adjusted_attention(
                 collapse_profile(profile_data['real_pet']), sample_lengths,
             )
         entry['sanity_checks'] = {
@@ -240,6 +248,7 @@ def collect_run(run_dir, manifest_index):
             'label_shuffle': label_shuffle_summary(
                 profile_data.get('real_pet', []), checks.get('n_permutations'), checks.get('seed')),
             'context_length_correlations': correlations,
+            'context_length_adjustment': context_adjustment,
             'raw_profile_rows_omitted': {
                 key: len(value) for key, value in profile_data.items()
             },
@@ -283,6 +292,7 @@ def build_comparisons(runs):
             'label_shuffle': [],
             'layer11_correctness': [],
             'context_length_correlations': [],
+            'context_length_adjustment': [],
         }
 
         for field in ('accuracy', 'macro_f1', 'weighted_f1'):
@@ -328,6 +338,7 @@ def build_comparisons(runs):
         control_map = {}
         correctness_map = {}
         correlation_map = {}
+        adjustment_map = {}
         for run in members:
             sanity = run.get('sanity_checks', {})
             shuffle = sanity.get('label_shuffle')
@@ -359,6 +370,26 @@ def build_comparisons(runs):
                     'rho': result.get('spearman_rho'),
                     'p_bh': result.get('p_bh'),
                 })
+            adjustment_data = sanity.get('context_length_adjustment') or {}
+            points = adjustment_data.get('data_points', [])
+            for layer in sorted({point['layer'] for point in points}):
+                for metric in ('Inward (Context → PET)', 'Outward (PET → Context)'):
+                    metric_points = [point for point in points
+                                     if point['layer'] == layer and point['metric'] == metric]
+                    raw_e = [p['raw_value'] for p in metric_points
+                             if p['condition'] == 'Euphemistic' and p['raw_value'] is not None]
+                    raw_n = [p['raw_value'] for p in metric_points
+                             if p['condition'] == 'Non-Euphemistic' and p['raw_value'] is not None]
+                    adj_e = [p['length_adjusted_value'] for p in metric_points
+                             if p['condition'] == 'Euphemistic' and p['length_adjusted_value'] is not None]
+                    adj_n = [p['length_adjusted_value'] for p in metric_points
+                             if p['condition'] == 'Non-Euphemistic' and p['length_adjusted_value'] is not None]
+                    key = (layer, metric)
+                    adjustment_map.setdefault(key, []).append({
+                        'run': run['run_name'],
+                        'raw_d': cohens_d(raw_e, raw_n),
+                        'adjusted_d': cohens_d(adj_e, adj_n),
+                    })
 
         for (profile_name, metric), values in sorted(control_map.items()):
             ds = [v['d'] for v in values if v['d'] is not None]
@@ -387,6 +418,14 @@ def build_comparisons(runs):
                     value['p_bh'] is not None and value['p_bh'] < 0.05
                     for value in values
                 ),
+            })
+        for (layer, metric), values in sorted(adjustment_map.items()):
+            raw_ds = [value['raw_d'] for value in values if value['raw_d'] is not None]
+            adjusted_ds = [value['adjusted_d'] for value in values if value['adjusted_d'] is not None]
+            group['context_length_adjustment'].append({
+                'layer': layer, 'metric': metric, 'n_runs': len(values),
+                'raw_d': mean_range(raw_ds),
+                'length_adjusted_d': mean_range(adjusted_ds),
             })
         comparisons.append(group)
     return comparisons
@@ -626,6 +665,32 @@ def render_plaintext(runs, comparisons, recurrence):
                 ['Condition', 'Layer', 'Metric', 'rho mean [range]', 'Positive',
                  'Negative', 'FDR-significant'], rows,
                 right_align=(1, 3, 4, 5, 6),
+            ))
+        if group['context_length_adjustment']:
+            lines += [
+                '',
+                'CONTEXT-LENGTH-ADJUSTED ATTENTION EFFECTS',
+                'Cohen\'s d across conditions before and after linear adjustment to the run mean context length.',
+                'Positive d means greater Euphemistic attention; these are descriptive, not new significance tests.',
+                '',
+            ]
+            rows = []
+            for row in group['context_length_adjustment']:
+                raw = row['raw_d']
+                adjusted = row['length_adjusted_d']
+                delta = None
+                if raw.get('mean') is not None and adjusted.get('mean') is not None:
+                    delta = adjusted['mean'] - raw['mean']
+                rows.append([
+                    row['layer'], row['metric'], fmt_range(raw, digits=3, signed=True),
+                    fmt_range(adjusted, digits=3, signed=True),
+                    '-' if delta is None else f'{delta:+.3f}',
+                    row['n_runs'],
+                ])
+            lines.extend(render_table(
+                ['Layer', 'Metric', 'Raw d mean [range]', 'Adjusted d mean [range]',
+                 'Δ mean d', 'Runs'], rows,
+                right_align=(0, 2, 3, 4, 5),
             ))
 
     lines += [

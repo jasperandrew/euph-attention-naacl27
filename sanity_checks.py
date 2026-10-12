@@ -36,7 +36,10 @@ import torch
 from src.cli import add_json_arg, add_model_arg, init_model, write_json
 from src.stats.models import load_classifier
 from src.stats.profiling import METRIC_COLUMNS, profile_attention_span
-from src.stats.correlations import context_length_correlations
+from src.stats.correlations import (
+    context_length_adjusted_attention,
+    context_length_correlations,
+)
 from src import config
 from src.attention_utils import get_model_output, _find_unbounded_pet
 from src.data_utils import get_tokenizer, load_splits, tokenize, get_tokens
@@ -258,6 +261,11 @@ def check_context_length_correlations(per_sample, lengths):
     return result
 
 
+def check_context_length_adjustment(per_sample, lengths):
+    """Create per-sample inward/outward values standardized to mean context length."""
+    return context_length_adjusted_attention(per_sample, lengths)
+
+
 def check_random_span(real_ps, rand_ps):
     logger.debug("\n" + "=" * 78)
     logger.debug(" Check 3 — Random-span baseline at layer 11")
@@ -401,6 +409,7 @@ def main(args):
     check_permutation(real_ps, args.n_perms, args.seed)
     check_length(real_ps, lengths)
     context_correlations = check_context_length_correlations(real_ps, lengths)
+    context_adjustment = check_context_length_adjustment(real_ps, lengths)
     check_random_span(real_ps, rand_ps)
     check_misclassified(real_ps)
     check_pet_mask(real_ps, mask_ps, n_flipped, n_total)
@@ -426,6 +435,7 @@ def main(args):
                      'masked_pet': mask_df, 'base_real_pet': base_df},
         'lengths': lengths,
         'context_length_correlations': context_correlations,
+        'context_length_adjustment': context_adjustment,
     })
     if args.json_out:
         logger.info(f"JSON profile data written to {args.json_out}")
