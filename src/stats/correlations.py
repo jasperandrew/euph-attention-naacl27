@@ -32,7 +32,10 @@ def context_length_correlations(per_sample, lengths):
     samples = per_sample.merge(
         lengths[['sample_id', 'context_len']], on='sample_id', validate='many_to_one',
     )
-    metrics = ('Inward (Context → PET)', 'Outward (PET → Context)')
+    metrics = tuple(metric for metric in (
+        'Inward (Context → PET)', 'Outward (PET → Context)',
+        'Sink (Sink → PET)', 'All (All → PET)',
+    ) if metric in samples.columns)
     layers = sorted(int(layer) for layer in per_sample['Layer'].unique())
     results = []
     for condition in ('Euphemistic', 'Non-Euphemistic'):
@@ -83,7 +86,10 @@ def context_length_adjusted_attention(per_sample, lengths):
     samples = per_sample.merge(
         lengths[['sample_id', 'context_len']], on='sample_id', validate='many_to_one',
     )
-    metrics = ('Inward (Context → PET)', 'Outward (PET → Context)')
+    metrics = tuple(metric for metric in (
+        'Inward (Context → PET)', 'Outward (PET → Context)',
+        'Sink (Sink → PET)', 'All (All → PET)',
+    ) if metric in samples.columns)
     results = []
     datapoints = []
     for layer in sorted(int(value) for value in samples['Layer'].unique()):

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu
+from src.stats.profiling import METRIC_COLUMNS
 from src.stats.correlations import (
     context_length_adjusted_attention,
     context_length_correlations,
@@ -15,10 +16,7 @@ from src.stats.correlations import (
 logger = logging.getLogger(__name__)
 
 
-METRICS = [
-    'Inward (Context → PET)', 'Outward (PET → Context)',
-    'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance',
-]
+METRICS = METRIC_COLUMNS
 PROFILE_KEYS = ('real_pet', 'masked_pet', 'random_span', 'base_real_pet')
 
 
@@ -49,7 +47,8 @@ def collapse_profile(rows):
     group_cols = ['sample_id', 'Layer', 'Condition']
     if 'Predicted' in df.columns:
         group_cols.append('Predicted')
-    return df.groupby(group_cols, sort=False)[METRICS].mean().reset_index()
+    available_metrics = [metric for metric in METRICS if metric in df.columns]
+    return df.groupby(group_cols, sort=False)[available_metrics].mean().reset_index()
 
 
 def effect(a, b, bonferroni_tests=None):
@@ -68,12 +67,16 @@ def control_effects(rows):
     ps = collapse_profile(rows)
     if ps.empty:
         return {}
+    n_layers = int(ps['Layer'].max())
     ps = ps[ps['Layer'] == 11]
     out = {}
-    for metric in METRICS:
+    available_metrics = [metric for metric in METRICS if metric in ps.columns]
+    for metric in available_metrics:
         e = ps.loc[ps['Condition'] == 'Euphemistic', metric].tolist()
         n = ps.loc[ps['Condition'] == 'Non-Euphemistic', metric].tolist()
-        out[metric] = effect(e, n, bonferroni_tests=72)
+        out[metric] = effect(
+            e, n, bonferroni_tests=len(available_metrics) * n_layers,
+        )
     return out
 
 
@@ -84,7 +87,8 @@ def misclassification_effects(rows):
     ps = ps[ps['Layer'] == 11].copy()
     ps['outcome'] = np.where(ps['Condition'] == ps['Predicted'], 'correct', 'misclassified')
     result = {}
-    for metric in METRICS:
+    available_metrics = [metric for metric in METRICS if metric in ps.columns]
+    for metric in available_metrics:
         result[metric] = {}
         for outcome in ('correct', 'misclassified'):
             group = ps[ps['outcome'] == outcome]
@@ -105,7 +109,8 @@ def label_shuffle_summary(rows, n_permutations, seed):
     sample_conditions = ps.groupby('sample_id', sort=True)['Condition'].first()
     sample_ids, conditions = sample_conditions.index.to_numpy(), sample_conditions.to_numpy()
     n_layers = int(ps['Layer'].max())
-    n_tests = len(METRICS) * n_layers
+    available_metrics = [metric for metric in METRICS if metric in ps.columns]
+    n_tests = len(available_metrics) * n_layers
     rng = np.random.default_rng(seed)
     significant_counts, layer11_counts = [], []
 
@@ -116,7 +121,7 @@ def label_shuffle_summary(rows, n_permutations, seed):
         total_sig = l11_sig = 0
         for layer in range(1, n_layers + 1):
             subset = permuted[permuted['Layer'] == layer]
-            for metric in METRICS:
+            for metric in available_metrics:
                 euphemistic = subset.loc[subset['shuffled_condition'] == 'Euphemistic', metric]
                 non_euphemistic = subset.loc[subset['shuffled_condition'] == 'Non-Euphemistic', metric]
                 p = mannwhitneyu(euphemistic, non_euphemistic, alternative='two-sided').pvalue
@@ -129,7 +134,7 @@ def label_shuffle_summary(rows, n_permutations, seed):
 
     real_l11 = ps[ps['Layer'] == 11]
     real_significant = 0
-    for metric in METRICS:
+    for metric in available_metrics:
         euphemistic = real_l11.loc[real_l11['Condition'] == 'Euphemistic', metric]
         non_euphemistic = real_l11.loc[real_l11['Condition'] == 'Non-Euphemistic', metric]
         p = mannwhitneyu(euphemistic, non_euphemistic, alternative='two-sided').pvalue
@@ -137,6 +142,7 @@ def label_shuffle_summary(rows, n_permutations, seed):
 
     return {
         'n_permutations': n_permutations,
+        'n_metrics': len(available_metrics),
         'n_tests_per_permutation': n_tests,
         'significant_tests_per_permutation': significant_counts,
         'mean_significant_tests': float(np.mean(significant_counts)),
@@ -349,6 +355,7 @@ def build_comparisons(runs):
                     'max_significant_tests': shuffle['max_significant_tests'],
                     'permutations_with_layer11_significance': shuffle['permutations_with_layer11_significance'],
                     'n_permutations': shuffle['n_permutations'],
+                    'n_metrics': shuffle.get('n_metrics'),
                     'real_layer11_significant_metrics': shuffle['real_layer11_significant_metrics'],
                 })
             for profile_name, metrics in sanity.get('layer11_control_effects', {}).items():
@@ -373,7 +380,8 @@ def build_comparisons(runs):
             adjustment_data = sanity.get('context_length_adjustment') or {}
             points = adjustment_data.get('data_points', [])
             for layer in sorted({point['layer'] for point in points}):
-                for metric in ('Inward (Context → PET)', 'Outward (PET → Context)'):
+                for metric in ('Inward (Context → PET)', 'Outward (PET → Context)',
+                               'Sink (Sink → PET)', 'All (All → PET)'):
                     metric_points = [point for point in points
                                      if point['layer'] == layer and point['metric'] == metric]
                     raw_e = [p['raw_value'] for p in metric_points
@@ -608,7 +616,7 @@ def render_plaintext(runs, comparisons, recurrence):
                 shuffle['run'], f"{shuffle['mean_significant_tests']:.2f}",
                 shuffle['max_significant_tests'],
                 f"{shuffle['permutations_with_layer11_significance']}/{shuffle['n_permutations']}",
-                f"{shuffle['real_layer11_significant_metrics']}/6",
+                f"{shuffle['real_layer11_significant_metrics']}/{shuffle.get('n_metrics', 6)}",
             ])
         lines.extend(render_table(
             ['Label-shuffle control', 'Mean significant tests / permutation', 'Max',
@@ -635,7 +643,9 @@ def render_plaintext(runs, comparisons, recurrence):
         correct = {r['metric']: r for r in group['layer11_correctness'] if r['outcome'] == 'correct'}
         incorrect = {r['metric']: r for r in group['layer11_correctness'] if r['outcome'] == 'misclassified'}
         rows = []
-        for metric in ('Inward (Context → PET)', 'Internal (PET → PET)', 'Sink (PET → Sink)'):
+        for metric in ('Inward (Context → PET)', 'Internal (PET → PET)',
+                       'Sink (PET → Sink)', 'Sink (Sink → PET)',
+                       'All (All → PET)'):
             if metric in correct or metric in incorrect:
                 rows.append([
                     metric, fmt_range(correct.get(metric, {}), signed=True),

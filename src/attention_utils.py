@@ -233,10 +233,17 @@ def pet_sink_attention(attn_weights, tokens, pet_tokens, sink_tokens=('<s>', '</
             head_weights = get_attn_head_weights(attn_weights, layer_i, head_i, seq_len)
             pet_rows = head_weights[pet_start:pet_end]
             sink_attn = pet_rows[:, sink_indices].sum(axis=1).mean()
+            sink_to_pet_attn = (
+                head_weights[np.ix_(sink_indices, range(pet_start, pet_end))].sum(axis=1).mean()
+                if sink_indices else 0.0
+            )
+            all_to_pet_attn = head_weights[:, pet_start:pet_end].sum(axis=1).mean()
             records.append({
                 'Layer': layer_i + 1,
                 'Head': head_i + 1,
                 'Sink (PET → Sink)': float(sink_attn),
+                'Sink (Sink → PET)': float(sink_to_pet_attn),
+                'All (All → PET)': float(all_to_pet_attn),
             })
 
     return pd.DataFrame(records)

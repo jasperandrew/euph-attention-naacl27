@@ -24,10 +24,10 @@ from src.stats.models import load_classifier
 from src import config
 from src.data_utils import load_splits
 from src.profiler.analysis import profile_dataframe
+from src.stats.profiling import METRIC_COLUMNS
 
 
-_METRICS = ['Inward (Context → PET)', 'Outward (PET → Context)',
-            'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance']
+_METRICS = METRIC_COLUMNS
 logger = logging.getLogger(__name__)
 
 

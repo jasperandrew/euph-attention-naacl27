@@ -9,7 +9,8 @@ from ..attention_utils import get_attn_head_weights
 
 METRIC_COLUMNS = [
     'Inward (Context → PET)', 'Outward (PET → Context)',
-    'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)', 'Distance',
+    'Internal (PET → PET)', 'Entropy', 'Sink (PET → Sink)',
+    'Sink (Sink → PET)', 'All (All → PET)', 'Distance',
 ]
 
 
@@ -57,6 +58,9 @@ def profile_attention_span(attn_weights, seq_len, span_start, span_end,
             ])
             sink = (weights[np.ix_(span_indices, sink_indices)].sum(axis=1).mean()
                     if sink_indices else 0)
+            sink_to_pet = (weights[np.ix_(sink_indices, span_indices)].sum(axis=1).mean()
+                           if sink_indices else 0)
+            all_to_pet = weights[:, span_indices].sum(axis=1).mean()
             span_positions = np.array(span_indices)[:, np.newaxis]
             distance = (
                 np.abs(span_positions - positions) * span_to_all
@@ -70,7 +74,9 @@ def profile_attention_span(attn_weights, seq_len, span_start, span_end,
                 METRIC_COLUMNS[2]: internal,
                 METRIC_COLUMNS[3]: entropy,
                 METRIC_COLUMNS[4]: sink,
-                METRIC_COLUMNS[5]: distance,
+                METRIC_COLUMNS[5]: sink_to_pet,
+                METRIC_COLUMNS[6]: all_to_pet,
+                METRIC_COLUMNS[7]: distance,
             }
             records.append(record)
             layer_records.append(record)

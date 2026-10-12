@@ -32,15 +32,30 @@ _PROFILE_METRICS = [
     'Outward (PET → Context)',
     'Internal (PET → PET)',
     'Sink (PET → Sink)',
+    'Sink (Sink → PET)',
+    'All (All → PET)',
     'Inward (Context → PET)',
     'Entropy',
     'Distance',
 ]
 
-_PROFILE_METRIC_LABELS = ['Outward', 'Internal', 'Sink', 'Inward', 'Entropy', 'Distance']
+_PROFILE_METRIC_LABELS = [
+    'Outward', 'Internal', 'PET→Sink', 'Sink→PET', 'All→PET', 'Inward', 'Entropy', 'Distance',
+]
 
 # Heads that are polyfunctional-and-leading at layer 11 (H3, H7, H11)
 _POLY_HEADS = {3, 7, 11}
+
+
+def _metric_grid(figsize, sharex=False):
+    """Create a three-column metric grid and hide unused axes."""
+    columns = 3
+    rows = int(np.ceil(len(_PROFILE_METRICS) / columns))
+    fig, axes = plt.subplots(rows, columns, figsize=figsize, sharex=sharex)
+    axes = np.asarray(axes).reshape(-1)
+    for ax in axes[len(_PROFILE_METRICS):]:
+        ax.set_visible(False)
+    return fig, axes
 
 
 def _cohens_d(a, b):
@@ -77,8 +92,7 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
     layers = sorted(agg_df['Layer'].unique())
     hue_order = _hue_order(agg_df, hue_col)
 
-    fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
-    axes_flat = axes.flatten()
+    fig, axes_flat = _metric_grid((12, 3.7 * int(np.ceil(len(_PROFILE_METRICS) / 3))), sharex=True)
 
     for i, metric in enumerate(_PROFILE_METRICS):
         ax = axes_flat[i]
@@ -113,9 +127,9 @@ def _plot_profile_by(agg_df, hue_col, title_suffix, file_suffix, output_dir, tit
 
 
 def _plot_profile_by_head(agg_df, hue_col, title_suffix, file_suffix, output_dir):
-    """6-panel line plot of each metric by head, split by hue_col."""
+    """Metric-grid line plot of each metric by head, split by hue_col."""
     hue_order = _hue_order(agg_df, hue_col)
-    fig, axes = plt.subplots(2, 3, figsize=(12, 5))
+    fig, axes = _metric_grid((12, 3.7 * int(np.ceil(len(_PROFILE_METRICS) / 3))))
     fig.suptitle(f"Attention Profile by Head — {_layer_range_label(agg_df)} ({title_suffix})", fontsize=14)
     axes = axes.flatten()
 
@@ -137,8 +151,8 @@ def _diff_pivot(df_pos, df_neg, metric):
 
 
 def _plot_metric_diff_grid(diffs, title, filename, output_dir):
-    """6-panel Head×Layer heatmap grid from a list of (metric_name, pivot_df) pairs."""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 5))
+    """Metric-grid Head×Layer heatmap from (metric_name, pivot_df) pairs."""
+    fig, axes = _metric_grid((15, 3.7 * int(np.ceil(len(_PROFILE_METRICS) / 3))))
     fig.suptitle(title, fontsize=14)
     axes = axes.flatten()
 
@@ -156,7 +170,7 @@ def _plot_metric_diff_grid(diffs, title, filename, output_dir):
 
 
 def plot_metric_diff_heatmaps(agg_df, output_dir=None):
-    """6-panel Layer×Head heatmap of Euph − Non-Euph mean difference for each profiler metric."""
+    """Layer×Head heatmaps of Euph − Non-Euph differences for each profiler metric."""
     layer_label = _layer_range_label(agg_df)
 
     euph_label = agg_df[agg_df['Condition'] == 'Euphemistic']
@@ -180,7 +194,7 @@ def plot_metric_diff_heatmaps(agg_df, output_dir=None):
 
 
 def plot_label_vs_pred_diff_heatmaps(agg_df, output_dir=None):
-    """For each class, 6-panel heatmap of (Predicted=X) − (GroundTruth=X) per metric."""
+    """For each class, heatmaps of (Predicted=X) − (GroundTruth=X) per metric."""
     if 'Predicted' not in agg_df.columns:
         return
 
@@ -210,7 +224,7 @@ def _plot_label_vs_prediction(agg_df, target_class, output_dir):
 
 
 def plot_base_vs_finetuned(ft_df, base_df, output_dir=None, unfrozen_only=False):
-    """6-panel line chart overlaying base and finetuned raw profiles by condition.
+    """Metric-grid line chart overlaying base and finetuned raw profiles by condition.
 
     Color encodes ground-truth class; line style encodes model (solid=finetuned,
     dashed=base). Shaded bands are 95% bootstrapped CIs from seaborn.
@@ -225,8 +239,7 @@ def plot_base_vs_finetuned(ft_df, base_df, output_dir=None, unfrozen_only=False)
 
     layers = sorted(combined['Layer'].unique())
 
-    fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
-    axes_flat = axes.flatten()
+    fig, axes_flat = _metric_grid((12, 3.7 * int(np.ceil(len(_PROFILE_METRICS) / 3))), sharex=True)
 
     for i, metric in enumerate(_PROFILE_METRICS):
         ax = axes_flat[i]
@@ -271,7 +284,7 @@ def plot_finetuning_diff_profile(diff_df, output_dir=None, unfrozen_only=False):
 
 
 def plot_layer11_lollipop(df, output_dir=None):
-    """6-panel per-head Cohen's d lollipop at layer 11 (Euph vs Non-Euph).
+    """Per-head Cohen's d lollipops at layer 11 (Euph vs Non-Euph).
 
     Color encodes direction (red=positive, blue=negative); intensity encodes
     significance after Bonferroni correction. Polyfunctional-and-leading heads
@@ -292,8 +305,7 @@ def plot_layer11_lollipop(df, output_dir=None):
             p_grid[i, j] = min(p * n_tests, 1.0)
 
     pos_color, neg_color = '#c0392b', '#2471a3'
-    fig, axes = plt.subplots(2, 3, figsize=(12, 5), sharex=True)
-    axes = axes.flatten()
+    fig, axes = _metric_grid((12, 3.7 * int(np.ceil(len(_PROFILE_METRICS) / 3))), sharex=True)
 
     for ax, (i, m_label) in zip(axes, enumerate(_PROFILE_METRIC_LABELS)):
         ds, p_bs = d_grid[i], p_grid[i]

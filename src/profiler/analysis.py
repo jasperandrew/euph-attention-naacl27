@@ -1,7 +1,7 @@
 """
 Single-sentence attention profiler.
 
-Computes 5 unpaired metrics for each sentence independently, then
+Computes eight attention metrics for each sentence independently, then
 profile_dataframe aggregates across a DataFrame of examples.
 """
 import logging
@@ -24,6 +24,8 @@ def profile_single_sample(model, text, pet_phrase, sink_tokens=('<s>', '</s>')):
       Internal (PET → PET)    : mean self-attention within PET
       Entropy                 : mean outward entropy (dispersion of PET rows)
       Sink (PET → Sink)       : fraction of PET attention going to <s>/</s>
+      Sink (Sink → PET)       : mean sink-token attention directed to PET tokens
+      All (All → PET)         : mean attention from all non-padding queries to PET tokens
       Distance           : expected token distance PET attends over
       Head Variance           : variance across heads (layer-level, duplicated per row)
 

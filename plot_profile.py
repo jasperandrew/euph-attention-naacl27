@@ -30,6 +30,8 @@ _METRIC_COLS = [
     'Outward (PET → Context)',
     'Internal (PET → PET)',
     'Sink (PET → Sink)',
+    'Sink (Sink → PET)',
+    'All (All → PET)',
     'Inward (Context → PET)',
     'Entropy',
     'Distance',
@@ -50,7 +52,12 @@ def _load_cache(name):
     path = _cache_path(name)
     if os.path.exists(path):
         logger.info(f"  Loading cached {name} from {path}")
-        return pd.read_parquet(path)
+        cached = pd.read_parquet(path)
+        missing = set(_METRIC_COLS).difference(cached.columns)
+        if missing:
+            logger.info("  Cached profile lacks new metric(s) %s; recomputing", sorted(missing))
+            return None
+        return cached
     return None
 
 
