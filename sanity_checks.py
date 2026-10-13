@@ -4,20 +4,20 @@ Each test sample is profiled three ways in a single pass (real PET span, random
 non-overlapping span of equal length, and PET tokens replaced with <mask>), then:
 
   1. Label-shuffle permutation control — should produce ~0 Bonferroni survivors.
-  2. PET / sequence length confound — residualize each layer-11 metric on
+  2. PET / sequence length confound — residualize each layer-10/11 metric on
      (pet_len, seq_len) and report d before vs after.
      Also correlate context length with inward/outward attention per layer and
      condition, correcting those tests together with Benjamini-Hochberg.
   3. Random-span (positional PET-specificity) — same input sentence, metrics
      computed on a random non-overlapping span. Tests whether the configuration
      is tied to the PET *location*.
-  4. Correct- vs misclassified-sample stratification at layer 11.
+  4. Correct- vs misclassified-sample stratification at layers 10 and 11.
   5. PET-mask (lexical PET-specificity) — PET tokens replaced with <mask>,
      model re-run, metrics computed at the (former) PET span. Tests whether the
      configuration depends on PET *content*.
   6. Finetuned − base difference test — base model profiled on the same test
      set; row-wise subtraction isolates finetuning-induced changes. Confirms
-     how many layer-11 metrics are significant in the difference test.
+     how many layer-10/11 metrics are significant in the difference test.
 
 Usage:
   python sanity_checks.py --model-dir runs/en/<run-name>
@@ -178,13 +178,15 @@ def check_permutation(per_sample, n_perms, seed):
     thresh = 0.05 / n_tests
 
     logger.debug(f"  {n_perms} shuffles · {n_tests} tests each · Bonferroni p < {thresh:.2e}\n")
-    n_sigs, n_l11_sigs = [], []
+    n_sigs = []
+    layer_sig_counts = {layer: [] for layer in (10, 11)}
     for _ in range(n_perms):
         shuffled = rng.permutation(conds)
         cmap = dict(zip(sample_ids, shuffled))
         ps = per_sample.copy()
         ps['Condition'] = ps['sample_id'].map(cmap)
-        ns, nl11 = 0, 0
+        ns = 0
+        layer_hits = {layer: 0 for layer in layer_sig_counts}
         for m in _METRICS:
             for layer in range(1, config.NUM_LAYERS + 1):
                 sub = ps[ps['Layer'] == layer]
@@ -193,29 +195,31 @@ def check_permutation(per_sample, n_perms, seed):
                 _, p = scipy.stats.mannwhitneyu(e, n, alternative='two-sided')
                 if p * n_tests < 0.05:
                     ns += 1
-                    if layer == 11:
-                        nl11 += 1
+                    if layer in layer_hits:
+                        layer_hits[layer] += 1
         n_sigs.append(ns)
-        n_l11_sigs.append(nl11)
+        for layer, count in layer_hits.items():
+            layer_sig_counts[layer].append(count)
     logger.debug(f"  Bonferroni-significant tests per shuffle (out of {n_tests}):")
     logger.debug(f"    mean={np.mean(n_sigs):.2f}, max={max(n_sigs)}, all={n_sigs}")
-    logger.debug(f"  Layer-11 significant per shuffle (out of {len(_METRICS)}):")
-    logger.debug(f"    mean={np.mean(n_l11_sigs):.2f}, max={max(n_l11_sigs)}, all={n_l11_sigs}")
-    l11_real = per_sample[per_sample['Layer'] == 11]
-    n_real_sig = sum(
-        scipy.stats.mannwhitneyu(
-            l11_real[l11_real['Condition'] == 'Euphemistic'][m].values,
-            l11_real[l11_real['Condition'] == 'Non-Euphemistic'][m].values,
-            alternative='two-sided',
-        )[1] * n_tests < 0.05
-        for m in _METRICS
-    )
-    logger.debug(f"  Real (unshuffled): {n_real_sig}/{len(_METRICS)} layer-11 metrics significant.")
+    for layer, counts in layer_sig_counts.items():
+        logger.debug(f"  Layer-{layer} significant per shuffle (out of {len(_METRICS)}):")
+        logger.debug(f"    mean={np.mean(counts):.2f}, max={max(counts)}, all={counts}")
+        real = per_sample[per_sample['Layer'] == layer]
+        n_real_sig = sum(
+            scipy.stats.mannwhitneyu(
+                real[real['Condition'] == 'Euphemistic'][m].values,
+                real[real['Condition'] == 'Non-Euphemistic'][m].values,
+                alternative='two-sided',
+            )[1] * n_tests < 0.05
+            for m in _METRICS
+        )
+        logger.debug(f"  Real (unshuffled): {n_real_sig}/{len(_METRICS)} layer-{layer} metrics significant.")
 
 
 def check_length(per_sample, lengths):
     logger.debug("\n" + "=" * 78)
-    logger.debug(" Check 2 — PET / sequence length confound at layer 11")
+    logger.debug(" Check 2 — PET / sequence length confound at layers 10 and 11")
     logger.debug("=" * 78)
     lengths = lengths.reset_index(drop=True).copy()
     lengths['sample_id'] = lengths.index
@@ -228,22 +232,21 @@ def check_length(per_sample, lengths):
           f"Non={n['seq_len'].mean():.2f} ({n['seq_len'].std():.2f}), "
           f"d={cohens_d(e['seq_len'], n['seq_len']):+.3f}")
 
-    l11 = per_sample[per_sample['Layer'] == 11].merge(
-        lengths[['sample_id', 'pet_len', 'seq_len']], on='sample_id')
-    logger.debug(f"\n  Per-metric d at layer 11, before and after residualizing on (pet_len, seq_len):")
-    logger.debug(f"  {'Metric':>26} {'d_raw':>9} {'d_resid':>9} {'Δ':>7}")
-    for m in _METRICS:
-        X = l11[['pet_len', 'seq_len']].values
-        y = l11[m].values
-        reg = sklearn.linear_model.LinearRegression().fit(X, y)
-        resid = y - reg.predict(X)
-        e_ = l11[l11['Condition'] == 'Euphemistic'].index
-        n_ = l11[l11['Condition'] == 'Non-Euphemistic'].index
-        d_raw = cohens_d(y[l11['Condition'].values == 'Euphemistic'],
-                         y[l11['Condition'].values == 'Non-Euphemistic'])
-        d_res = cohens_d(resid[l11['Condition'].values == 'Euphemistic'],
-                         resid[l11['Condition'].values == 'Non-Euphemistic'])
-        logger.debug(f"  {m:>26} {d_raw:>+9.3f} {d_res:>+9.3f} {(d_res - d_raw):>+7.3f}")
+    for layer in (10, 11):
+        layer_ps = per_sample[per_sample['Layer'] == layer].merge(
+            lengths[['sample_id', 'pet_len', 'seq_len']], on='sample_id')
+        logger.debug(f"\n  Per-metric d at layer {layer}, before and after residualizing on (pet_len, seq_len):")
+        logger.debug(f"  {'Metric':>26} {'d_raw':>9} {'d_resid':>9} {'Δ':>7}")
+        for m in _METRICS:
+            X = layer_ps[['pet_len', 'seq_len']].values
+            y = layer_ps[m].values
+            reg = sklearn.linear_model.LinearRegression().fit(X, y)
+            resid = y - reg.predict(X)
+            d_raw = cohens_d(y[layer_ps['Condition'].values == 'Euphemistic'],
+                             y[layer_ps['Condition'].values == 'Non-Euphemistic'])
+            d_res = cohens_d(resid[layer_ps['Condition'].values == 'Euphemistic'],
+                             resid[layer_ps['Condition'].values == 'Non-Euphemistic'])
+            logger.debug(f"  {m:>26} {d_raw:>+9.3f} {d_res:>+9.3f} {(d_res - d_raw):>+7.3f}")
 
 
 def check_context_length_correlations(per_sample, lengths):
@@ -268,58 +271,59 @@ def check_context_length_adjustment(per_sample, lengths):
 
 def check_random_span(real_ps, rand_ps):
     logger.debug("\n" + "=" * 78)
-    logger.debug(" Check 3 — Random-span baseline at layer 11")
+    logger.debug(" Check 3 — Random-span baseline at layers 10 and 11")
     logger.debug("=" * 78)
     n_tests = len(_METRICS) * config.NUM_LAYERS
     thresh = 0.05 / n_tests
     logger.debug(f"  Bonferroni threshold p < {thresh:.2e}\n")
-    logger.debug(f"  {'Metric':>26} {'d_real':>9} {'d_rand':>9} {'p_rand (raw)':>14} {'p_rand (bonf)':>14} {'sig':>4}")
-    for m in _METRICS:
-        rl = real_ps[real_ps['Layer'] == 11]
-        rd = rand_ps[rand_ps['Layer'] == 11]
-        e_r = rl[rl['Condition'] == 'Euphemistic'][m].values
-        n_r = rl[rl['Condition'] == 'Non-Euphemistic'][m].values
-        e_d = rd[rd['Condition'] == 'Euphemistic'][m].values
-        n_d = rd[rd['Condition'] == 'Non-Euphemistic'][m].values
-        d_real = cohens_d(e_r, n_r)
-        d_rand = cohens_d(e_d, n_d)
-        _, p = scipy.stats.mannwhitneyu(e_d, n_d, alternative='two-sided')
-        p_b = min(p * n_tests, 1.0)
-        sig = '***' if p_b < 0.001 else '**' if p_b < 0.01 else '*' if p_b < 0.05 else ''
-        logger.debug(f"  {m:>26} {d_real:>+9.3f} {d_rand:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
+    logger.debug(f"  {'Layer':>5} {'Metric':>26} {'d_real':>9} {'d_rand':>9} {'p_rand (raw)':>14} {'p_rand (bonf)':>14} {'sig':>4}")
+    for layer in (10, 11):
+        rl = real_ps[real_ps['Layer'] == layer]
+        rd = rand_ps[rand_ps['Layer'] == layer]
+        for m in _METRICS:
+            e_r = rl[rl['Condition'] == 'Euphemistic'][m].values
+            n_r = rl[rl['Condition'] == 'Non-Euphemistic'][m].values
+            e_d = rd[rd['Condition'] == 'Euphemistic'][m].values
+            n_d = rd[rd['Condition'] == 'Non-Euphemistic'][m].values
+            d_real = cohens_d(e_r, n_r)
+            d_rand = cohens_d(e_d, n_d)
+            _, p = scipy.stats.mannwhitneyu(e_d, n_d, alternative='two-sided')
+            p_b = min(p * n_tests, 1.0)
+            sig = '***' if p_b < 0.001 else '**' if p_b < 0.01 else '*' if p_b < 0.05 else ''
+            logger.debug(f"  {layer:>5} {m:>26} {d_real:>+9.3f} {d_rand:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
 
 
 def check_misclassified(per_sample):
     logger.debug("\n" + "=" * 78)
-    logger.debug(" Check 4 — Correct vs misclassified at layer 11")
+    logger.debug(" Check 4 — Correct vs misclassified at layers 10 and 11")
     logger.debug("=" * 78)
-    l11 = per_sample[per_sample['Layer'] == 11].copy()
-    l11['correct'] = l11['Condition'] == l11['Predicted']
-    n_cor = int(l11['correct'].sum())
-    n_mis = int((~l11['correct']).sum())
-    n_e_cor = int(((l11['Condition'] == 'Euphemistic') & l11['correct']).sum())
-    n_n_cor = int(((l11['Condition'] == 'Non-Euphemistic') & l11['correct']).sum())
-    n_e_mis = int(((l11['Condition'] == 'Euphemistic') & ~l11['correct']).sum())
-    n_n_mis = int(((l11['Condition'] == 'Non-Euphemistic') & ~l11['correct']).sum())
-    logger.debug(f"  Correct: {n_cor} (E={n_e_cor}, N={n_n_cor})  Misclassified: {n_mis} (E={n_e_mis}, N={n_n_mis})\n")
-
-    logger.debug(f"  {'Metric':>26} {'d_correct':>11} {'d_misclass':>12} {'Δ':>7}")
-    for m in _METRICS:
-        c = l11[l11['correct']]
-        i = l11[~l11['correct']]
-        e_c = c[c['Condition'] == 'Euphemistic'][m].values
-        n_c = c[c['Condition'] == 'Non-Euphemistic'][m].values
-        e_i = i[i['Condition'] == 'Euphemistic'][m].values
-        n_i = i[i['Condition'] == 'Non-Euphemistic'][m].values
-        d_c = cohens_d(e_c, n_c)
-        d_i = cohens_d(e_i, n_i) if len(e_i) > 1 and len(n_i) > 1 else float('nan')
-        delta = (abs(d_i) - abs(d_c)) if not np.isnan(d_i) else float('nan')
-        logger.debug(f"  {m:>26} {d_c:>+11.3f} {d_i:>+12.3f} {delta:>+7.3f}")
+    logger.debug(f"  {'Layer':>5} {'Metric':>26} {'d_correct':>11} {'d_misclass':>12} {'Δ':>7}")
+    for layer in (10, 11):
+        layer_ps = per_sample[per_sample['Layer'] == layer].copy()
+        layer_ps['correct'] = layer_ps['Condition'] == layer_ps['Predicted']
+        n_cor = int(layer_ps['correct'].sum())
+        n_mis = int((~layer_ps['correct']).sum())
+        n_e_cor = int(((layer_ps['Condition'] == 'Euphemistic') & layer_ps['correct']).sum())
+        n_n_cor = int(((layer_ps['Condition'] == 'Non-Euphemistic') & layer_ps['correct']).sum())
+        n_e_mis = int(((layer_ps['Condition'] == 'Euphemistic') & ~layer_ps['correct']).sum())
+        n_n_mis = int(((layer_ps['Condition'] == 'Non-Euphemistic') & ~layer_ps['correct']).sum())
+        logger.debug(f"  Layer {layer}: correct={n_cor} (E={n_e_cor}, N={n_n_cor}); misclassified={n_mis} (E={n_e_mis}, N={n_n_mis})")
+        for m in _METRICS:
+            c = layer_ps[layer_ps['correct']]
+            i = layer_ps[~layer_ps['correct']]
+            e_c = c[c['Condition'] == 'Euphemistic'][m].values
+            n_c = c[c['Condition'] == 'Non-Euphemistic'][m].values
+            e_i = i[i['Condition'] == 'Euphemistic'][m].values
+            n_i = i[i['Condition'] == 'Non-Euphemistic'][m].values
+            d_c = cohens_d(e_c, n_c)
+            d_i = cohens_d(e_i, n_i) if len(e_i) > 1 and len(n_i) > 1 else float('nan')
+            delta = (abs(d_i) - abs(d_c)) if not np.isnan(d_i) else float('nan')
+            logger.debug(f"  {layer:>5} {m:>26} {d_c:>+11.3f} {d_i:>+12.3f} {delta:>+7.3f}")
 
 
 def check_pet_mask(real_ps, mask_ps, n_pred_flipped, n_total):
     logger.debug("\n" + "=" * 78)
-    logger.debug(" Check 5 — PET-mask baseline at layer 11 (lexical PET-specificity)")
+    logger.debug(" Check 5 — PET-mask baseline at layers 10 and 11 (lexical PET-specificity)")
     logger.debug("=" * 78)
     flip_pct = 100.0 * n_pred_flipped / n_total if n_total else 0.0
     logger.debug(f"  Prediction flip rate after masking PET: {n_pred_flipped}/{n_total} = {flip_pct:.1f}%")
@@ -327,25 +331,26 @@ def check_pet_mask(real_ps, mask_ps, n_pred_flipped, n_total):
     n_tests = len(_METRICS) * config.NUM_LAYERS
     thresh = 0.05 / n_tests
     logger.debug(f"  Bonferroni threshold p < {thresh:.2e}\n")
-    logger.debug(f"  {'Metric':>26} {'d_real':>9} {'d_mask':>9} {'p_mask (raw)':>14} {'p_mask (bonf)':>14} {'sig':>4}")
-    for m in _METRICS:
-        rl = real_ps[real_ps['Layer'] == 11]
-        ml = mask_ps[mask_ps['Layer'] == 11]
-        e_r = rl[rl['Condition'] == 'Euphemistic'][m].values
-        n_r = rl[rl['Condition'] == 'Non-Euphemistic'][m].values
-        e_m = ml[ml['Condition'] == 'Euphemistic'][m].values
-        n_m = ml[ml['Condition'] == 'Non-Euphemistic'][m].values
-        d_real = cohens_d(e_r, n_r)
-        d_mask = cohens_d(e_m, n_m)
-        _, p = scipy.stats.mannwhitneyu(e_m, n_m, alternative='two-sided')
-        p_b = min(p * n_tests, 1.0)
-        sig = '***' if p_b < 0.001 else '**' if p_b < 0.01 else '*' if p_b < 0.05 else ''
-        logger.debug(f"  {m:>26} {d_real:>+9.3f} {d_mask:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
+    logger.debug(f"  {'Layer':>5} {'Metric':>26} {'d_real':>9} {'d_mask':>9} {'p_mask (raw)':>14} {'p_mask (bonf)':>14} {'sig':>4}")
+    for layer in (10, 11):
+        rl = real_ps[real_ps['Layer'] == layer]
+        ml = mask_ps[mask_ps['Layer'] == layer]
+        for m in _METRICS:
+            e_r = rl[rl['Condition'] == 'Euphemistic'][m].values
+            n_r = rl[rl['Condition'] == 'Non-Euphemistic'][m].values
+            e_m = ml[ml['Condition'] == 'Euphemistic'][m].values
+            n_m = ml[ml['Condition'] == 'Non-Euphemistic'][m].values
+            d_real = cohens_d(e_r, n_r)
+            d_mask = cohens_d(e_m, n_m)
+            _, p = scipy.stats.mannwhitneyu(e_m, n_m, alternative='two-sided')
+            p_b = min(p * n_tests, 1.0)
+            sig = '***' if p_b < 0.001 else '**' if p_b < 0.01 else '*' if p_b < 0.05 else ''
+            logger.debug(f"  {layer:>5} {m:>26} {d_real:>+9.3f} {d_mask:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
 
 
 def check_diff_test(real_df, base_df):
     logger.debug("\n" + "=" * 78)
-    logger.debug(" Check 6 — Finetuned − base difference test at layer 11")
+    logger.debug(" Check 6 — Finetuned − base difference test at layers 10 and 11")
     logger.debug("=" * 78)
     n_tests = len(_METRICS) * config.NUM_LAYERS
     thresh = 0.05 / n_tests
@@ -357,28 +362,29 @@ def check_diff_test(real_df, base_df):
         diff_df[m] = real_df[m].values - base_reset[m].values
     diff_ps = to_per_sample(diff_df)
 
-    logger.debug(f"  {'Metric':>26} {'d_ft':>9} {'d_base':>9} {'d_diff':>9} {'p_diff (raw)':>14} {'p_diff (bonf)':>14} {'sig':>4}")
+    logger.debug(f"  {'Layer':>5} {'Metric':>26} {'d_ft':>9} {'d_base':>9} {'d_diff':>9} {'p_diff (raw)':>14} {'p_diff (bonf)':>14} {'sig':>4}")
     real_ps = to_per_sample(real_df)
     base_ps = to_per_sample(base_df)
-    n_sig = 0
-    for m in _METRICS:
-        rl = real_ps[real_ps['Layer'] == 11]
-        bl = base_ps[base_ps['Layer'] == 11]
-        dl = diff_ps[diff_ps['Layer'] == 11]
-        d_ft   = cohens_d(rl[rl['Condition'] == 'Euphemistic'][m].values,
-                           rl[rl['Condition'] == 'Non-Euphemistic'][m].values)
-        d_base = cohens_d(bl[bl['Condition'] == 'Euphemistic'][m].values,
-                           bl[bl['Condition'] == 'Non-Euphemistic'][m].values)
-        e_d = dl[dl['Condition'] == 'Euphemistic'][m].values
-        n_d = dl[dl['Condition'] == 'Non-Euphemistic'][m].values
-        d_diff = cohens_d(e_d, n_d)
-        _, p = scipy.stats.mannwhitneyu(e_d, n_d, alternative='two-sided')
-        p_b = min(p * n_tests, 1.0)
-        sig = '***' if p_b < 0.001 else '**' if p_b < 0.01 else '*' if p_b < 0.05 else ''
-        if p_b < 0.05:
-            n_sig += 1
-        logger.debug(f"  {m:>26} {d_ft:>+9.3f} {d_base:>+9.3f} {d_diff:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
-    logger.debug(f"\n  {n_sig}/{len(_METRICS)} layer-11 metrics significant in the difference test.")
+    for layer in (10, 11):
+        n_sig = 0
+        rl = real_ps[real_ps['Layer'] == layer]
+        bl = base_ps[base_ps['Layer'] == layer]
+        dl = diff_ps[diff_ps['Layer'] == layer]
+        for m in _METRICS:
+            d_ft = cohens_d(rl[rl['Condition'] == 'Euphemistic'][m].values,
+                            rl[rl['Condition'] == 'Non-Euphemistic'][m].values)
+            d_base = cohens_d(bl[bl['Condition'] == 'Euphemistic'][m].values,
+                              bl[bl['Condition'] == 'Non-Euphemistic'][m].values)
+            e_d = dl[dl['Condition'] == 'Euphemistic'][m].values
+            n_d = dl[dl['Condition'] == 'Non-Euphemistic'][m].values
+            d_diff = cohens_d(e_d, n_d)
+            _, p = scipy.stats.mannwhitneyu(e_d, n_d, alternative='two-sided')
+            p_b = min(p * n_tests, 1.0)
+            sig = '***' if p_b < 0.001 else '**' if p_b < 0.01 else '*' if p_b < 0.05 else ''
+            if p_b < 0.05:
+                n_sig += 1
+            logger.debug(f"  {layer:>5} {m:>26} {d_ft:>+9.3f} {d_base:>+9.3f} {d_diff:>+9.3f} {p:>14.2e} {p_b:>14.2e} {sig:>4}")
+        logger.debug(f"  {n_sig}/{len(_METRICS)} layer-{layer} metrics significant in the difference test.")
 
 
 def main(args):
@@ -450,7 +456,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Five sanity checks for the layer-11 reconfiguration claim: permutation control, length confound, random-span baseline, misclassification stratification, and PET-mask lexical control."
+        description="Six sanity checks for the layer-10/11 reconfiguration claim: permutation control, length confound, random-span baseline, misclassification stratification, PET-mask lexical control, and finetuned-minus-base differences."
     )
     parser.add_argument('--max-samples', type=int, default=None)
     parser.add_argument('--n-perms', type=int, default=20)

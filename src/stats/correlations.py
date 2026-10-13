@@ -233,3 +233,164 @@ def context_length_adjusted_tests(data_points, bonferroni_tests=FULL_ATTENTION_T
                 **test,
             })
     return results
+
+
+def _joint_length_adjusted_class_test(values, conditions, pet_lengths,
+                                      context_lengths, bonferroni_tests):
+    """Test the class coefficient in attention ~ class + PET length + context length."""
+    y = np.asarray(values, dtype=float)
+    condition = np.asarray(conditions, dtype=float)
+    pet_length = np.asarray(pet_lengths, dtype=float)
+    context_length = np.asarray(context_lengths, dtype=float)
+    finite = (np.isfinite(y) & np.isfinite(condition) & np.isfinite(pet_length) &
+              np.isfinite(context_length))
+    y, condition = y[finite], condition[finite]
+    pet_length, context_length = pet_length[finite], context_length[finite]
+    n = len(y)
+    if n <= 4 or np.unique(condition).size != 2:
+        return None
+
+    centered_pet = pet_length - pet_length.mean()
+    centered_context = context_length - context_length.mean()
+    design = np.column_stack((np.ones(n), condition, centered_pet, centered_context))
+    try:
+        bread = np.linalg.inv(design.T @ design)
+    except np.linalg.LinAlgError:
+        return None
+    coefficients = bread @ design.T @ y
+    residuals = y - design @ coefficients
+    leverage = np.einsum('ij,jk,ik->i', design, bread, design)
+    if np.any(1.0 - leverage <= np.finfo(float).eps):
+        return None
+
+    hc3_residuals = residuals / (1.0 - leverage)
+    scores = design * hc3_residuals[:, None]
+    covariance = bread @ (scores.T @ scores) @ bread
+    standard_error = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    coefficient = float(coefficients[1])
+    if not np.isfinite(standard_error) or standard_error <= 0:
+        p_raw = 1.0 if coefficient == 0 else 0.0
+        statistic = None
+    else:
+        statistic = coefficient / standard_error
+        p_raw = float(2.0 * scipy.stats.t.sf(abs(statistic), df=n - 4))
+    p_bonferroni = min(p_raw * bonferroni_tests, 1.0)
+    return {
+        'n_euphemistic': int(np.sum(condition == 1)),
+        'n_non_euphemistic': int(np.sum(condition == 0)),
+        'adjusted_mean_difference': coefficient,
+        'hc3_standard_error': standard_error,
+        't_statistic': float(statistic) if statistic is not None else None,
+        'degrees_of_freedom': n - 4,
+        'p_raw': p_raw,
+        'p_bonferroni': p_bonferroni,
+        'significant_bonferroni_0_05': p_bonferroni < 0.05,
+    }
+
+
+def pet_context_length_adjusted_attention(per_sample, lengths):
+    """Jointly adjust attention profiles for PET and context token counts."""
+    lengths = lengths.reset_index(drop=True).copy()
+    lengths['sample_id'] = lengths.index
+    required = ['sample_id', 'pet_len', 'context_len']
+    samples = per_sample.merge(
+        lengths[required], on='sample_id', validate='many_to_one',
+    )
+    metrics = tuple(metric for metric in LENGTH_ADJUSTED_METRICS
+                    if metric in samples.columns)
+    results = []
+    data_points = []
+    for layer in sorted(int(value) for value in samples['Layer'].unique()):
+        layer_df = samples[samples['Layer'] == layer].copy()
+        pet_length = layer_df['pet_len'].to_numpy(dtype=float)
+        context_length = layer_df['context_len'].to_numpy(dtype=float)
+        reference_pet_length = float(np.mean(pet_length))
+        reference_context_length = float(np.mean(context_length))
+        centered_pet = pet_length - reference_pet_length
+        centered_context = context_length - reference_context_length
+        condition = (layer_df['Condition'] == 'Euphemistic').to_numpy(dtype=float)
+        predictors = np.column_stack([condition, centered_pet, centered_context])
+        for metric in metrics:
+            y = layer_df[metric].to_numpy(dtype=float)
+            finite = np.isfinite(y) & np.isfinite(centered_pet) & np.isfinite(centered_context)
+            beta_pet = beta_context = None
+            adjusted = np.full(len(y), np.nan)
+            if (finite.sum() >= 4 and np.unique(centered_pet[finite]).size > 1 and
+                    np.unique(centered_context[finite]).size > 1):
+                regression = LinearRegression().fit(predictors[finite], y[finite])
+                beta_pet = float(regression.coef_[1])
+                beta_context = float(regression.coef_[2])
+                adjusted[finite] = (
+                    y[finite] - beta_pet * centered_pet[finite]
+                    - beta_context * centered_context[finite]
+                )
+            for (_, row), raw_value, adjusted_value in zip(
+                    layer_df.iterrows(), y, adjusted):
+                data_points.append({
+                    'sample_id': int(row['sample_id']),
+                    'condition': row['Condition'],
+                    'layer': layer,
+                    'metric': metric,
+                    'pet_len': int(row['pet_len']),
+                    'context_len': int(row['context_len']),
+                    'raw_value': float(raw_value) if np.isfinite(raw_value) else None,
+                    'length_adjusted_value': (
+                        float(adjusted_value) if np.isfinite(adjusted_value) else None
+                    ),
+                })
+            for cond in ('Euphemistic', 'Non-Euphemistic'):
+                mask = (layer_df['Condition'].to_numpy() == cond) & np.isfinite(adjusted)
+                results.append({
+                    'condition': cond,
+                    'layer': layer,
+                    'metric': metric,
+                    'n': int(mask.sum()),
+                    'mean_raw': float(np.mean(y[mask])) if mask.any() else None,
+                    'mean_length_adjusted': (
+                        float(np.mean(adjusted[mask])) if mask.any() else None
+                    ),
+                    'reference_pet_len': reference_pet_length,
+                    'reference_context_len': reference_context_length,
+                    'pet_length_slope': beta_pet,
+                    'context_length_slope': beta_context,
+                })
+
+    adjustment = {
+        'method': 'Joint linear PET- and context-length adjustment with a class intercept',
+        'adjustment': (
+            'value - pet_length_slope * (pet_len - run_mean_pet_len) '
+            '- context_length_slope * (context_len - run_mean_context_len)'
+        ),
+        'reference': 'run mean PET and context token lengths',
+        'metrics': list(metrics),
+        'multiple_testing_correction': (
+            'Bonferroni across the existing 7-metric × 12-layer family '
+            f'({FULL_ATTENTION_TEST_FAMILY_SIZE} tests per run)'
+        ),
+        'results': results,
+        'data_points': data_points,
+    }
+    points = pd.DataFrame(data_points)
+    tests = []
+    if not points.empty:
+        for (layer, metric), group in points.groupby(['layer', 'metric'], sort=True):
+            conditions = (group['condition'] == 'Euphemistic').to_numpy(dtype=float)
+            test = _joint_length_adjusted_class_test(
+                group['raw_value'].to_numpy(dtype=float), conditions,
+                group['pet_len'].to_numpy(dtype=float),
+                group['context_len'].to_numpy(dtype=float),
+                FULL_ATTENTION_TEST_FAMILY_SIZE,
+            )
+            if test is not None:
+                tests.append({
+                    'layer': int(layer),
+                    'metric': metric,
+                    'test': (
+                        'HC3 robust OLS class coefficient; '
+                        'attention ~ class + PET length + context length'
+                    ),
+                    'n_bonferroni_tests': FULL_ATTENTION_TEST_FAMILY_SIZE,
+                    **test,
+                })
+    adjustment['class_effect_tests'] = tests
+    return adjustment

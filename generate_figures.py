@@ -26,10 +26,10 @@ MODEL_COMBINED_OUTPUT = "aggregate_profile_base_vs_ft_by_label.png"
 METRICS = [
     ("Internal (PET → PET)", "Internal (PET → PET)"),
     ("Inward (Context → PET)", "Inward (Context → PET)"),
-    ("Sink (PET → Sink)", "From Sink (PET → Sink)"),
+    ("Sink (PET → Sink)", "To Sink (PET → Sink)"),
     ("Distance", "Distance"),
     ("Outward (PET → Context)", "Outward (PET → Context)"),
-    ("Sink (Sink → PET)", "To Sink (Sink → PET)"),
+    ("Sink (Sink → PET)", "From Sink (Sink → PET)"),
 ]
 CONDITIONS = ("Euphemistic", "Non-Euphemistic")
 MODELS = ("Finetuned", "Base")

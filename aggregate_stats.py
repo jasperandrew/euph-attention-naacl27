@@ -15,6 +15,7 @@ from src.stats.correlations import (
     context_length_adjusted_attention,
     context_length_adjusted_tests,
     context_length_correlations,
+    pet_context_length_adjusted_attention,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,24 +89,104 @@ def control_effects(rows):
     return out
 
 
+def paired_pet_random_contrasts(real_rows, random_rows):
+    """Compare class effects on per-example PET-minus-random-span profiles.
+
+    Profiles are emitted in test-example order, with one complete layer/head
+    block per example. Verify that the real and random files have matching
+    examples before pairing their per-sample, per-layer averages.
+    """
+    if not real_rows or not random_rows:
+        return []
+
+    def sample_metadata(rows):
+        frame = pd.DataFrame(rows)
+        n_layers, n_heads = int(frame['Layer'].max()), int(frame['Head'].max())
+        block_size = n_layers * n_heads
+        if len(frame) % block_size:
+            raise ValueError(
+                f"Profile row count {len(frame)} is not divisible by {block_size}"
+            )
+        frame['sample_id'] = np.arange(len(frame)) // block_size
+        metadata = frame.groupby('sample_id', sort=True).agg(
+            Condition=('Condition', 'first'),
+            Sample=('Sample', 'first'),
+            n_conditions=('Condition', 'nunique'),
+            n_samples=('Sample', 'nunique'),
+        )
+        if (metadata['n_conditions'] != 1).any() or (metadata['n_samples'] != 1).any():
+            raise ValueError('Profile blocks contain inconsistent sample metadata')
+        return metadata[['Condition', 'Sample']]
+
+    real_meta = sample_metadata(real_rows)
+    random_meta = sample_metadata(random_rows)
+    if not real_meta.equals(random_meta):
+        raise ValueError(
+            'Real-PET and random-span profiles do not contain the same examples '
+            'in the same order; paired span contrasts cannot be computed safely'
+        )
+
+    real = collapse_profile(real_rows)
+    random_span = collapse_profile(random_rows)
+    metrics = [metric for metric in METRICS
+               if metric in real.columns and metric in random_span.columns]
+    paired = real[['sample_id', 'Layer', 'Condition', *metrics]].merge(
+        random_span[['sample_id', 'Layer', 'Condition', *metrics]],
+        on=['sample_id', 'Layer', 'Condition'],
+        suffixes=('_real_pet', '_random_span'),
+        validate='one_to_one',
+    )
+    for metric in metrics:
+        paired[metric] = paired[f'{metric}_real_pet'] - paired[f'{metric}_random_span']
+
+    n_layers = int(paired['Layer'].max())
+    family_size = len(metrics) * n_layers
+    results = []
+    for layer in range(1, n_layers + 1):
+        layer_data = paired[paired['Layer'] == layer]
+        for metric in metrics:
+            euphemistic = layer_data.loc[
+                layer_data['Condition'] == 'Euphemistic', metric
+            ].tolist()
+            non_euphemistic = layer_data.loc[
+                layer_data['Condition'] == 'Non-Euphemistic', metric
+            ].tolist()
+            test = effect(euphemistic, non_euphemistic, family_size)
+            results.append({
+                'layer': layer,
+                'metric': metric,
+                'paired_difference': 'real_pet_minus_random_span',
+                'mean_difference_euphemistic': (
+                    float(np.mean(euphemistic)) if euphemistic else None
+                ),
+                'mean_difference_non_euphemistic': (
+                    float(np.mean(non_euphemistic)) if non_euphemistic else None
+                ),
+                **test,
+            })
+    return results
+
+
 def misclassification_effects(rows):
     ps = collapse_profile(rows)
     if ps.empty or 'Predicted' not in ps.columns:
         return {}
-    ps = ps[ps['Layer'] == 11].copy()
     ps['outcome'] = np.where(ps['Condition'] == ps['Predicted'], 'correct', 'misclassified')
     result = {}
     available_metrics = [metric for metric in METRICS if metric in ps.columns]
-    for metric in available_metrics:
-        result[metric] = {}
-        for outcome in ('correct', 'misclassified'):
-            group = ps[ps['outcome'] == outcome]
-            e = group.loc[group['Condition'] == 'Euphemistic', metric].tolist()
-            n = group.loc[group['Condition'] == 'Non-Euphemistic', metric].tolist()
-            result[metric][outcome] = {
-                'n_euphemistic': len(e), 'n_non_euphemistic': len(n),
-                'cohens_d': cohens_d(e, n),
-            }
+    for layer in (10, 11):
+        layer_ps = ps[ps['Layer'] == layer]
+        result[layer] = {}
+        for metric in available_metrics:
+            result[layer][metric] = {}
+            for outcome in ('correct', 'misclassified'):
+                group = layer_ps[layer_ps['outcome'] == outcome]
+                e = group.loc[group['Condition'] == 'Euphemistic', metric].tolist()
+                n = group.loc[group['Condition'] == 'Non-Euphemistic', metric].tolist()
+                result[layer][metric][outcome] = {
+                    'n_euphemistic': len(e), 'n_non_euphemistic': len(n),
+                    'cohens_d': cohens_d(e, n),
+                }
     return result
 
 
@@ -120,13 +201,15 @@ def label_shuffle_summary(rows, n_permutations, seed):
     available_metrics = [metric for metric in METRICS if metric in ps.columns]
     n_tests = len(available_metrics) * n_layers
     rng = np.random.default_rng(seed)
-    significant_counts, layer11_counts = [], []
+    significant_counts = []
+    layer_counts = {layer: [] for layer in (10, 11)}
 
     for _ in range(n_permutations):
         shuffled = rng.permutation(conditions)
         condition_map = dict(zip(sample_ids, shuffled))
         permuted = ps.assign(shuffled_condition=ps['sample_id'].map(condition_map))
-        total_sig = l11_sig = 0
+        total_sig = 0
+        per_layer_sig = {layer: 0 for layer in layer_counts}
         for layer in range(1, n_layers + 1):
             subset = permuted[permuted['Layer'] == layer]
             for metric in available_metrics:
@@ -135,30 +218,36 @@ def label_shuffle_summary(rows, n_permutations, seed):
                 p = mannwhitneyu(euphemistic, non_euphemistic, alternative='two-sided').pvalue
                 if p * n_tests < 0.05:
                     total_sig += 1
-                    if layer == 11:
-                        l11_sig += 1
+                    if layer in per_layer_sig:
+                        per_layer_sig[layer] += 1
         significant_counts.append(total_sig)
-        layer11_counts.append(l11_sig)
+        for layer, count in per_layer_sig.items():
+            layer_counts[layer].append(count)
 
-    real_l11 = ps[ps['Layer'] == 11]
-    real_significant = 0
-    for metric in available_metrics:
-        euphemistic = real_l11.loc[real_l11['Condition'] == 'Euphemistic', metric]
-        non_euphemistic = real_l11.loc[real_l11['Condition'] == 'Non-Euphemistic', metric]
-        p = mannwhitneyu(euphemistic, non_euphemistic, alternative='two-sided').pvalue
-        real_significant += p * n_tests < 0.05
+    real_layer_significant = {}
+    for layer in layer_counts:
+        real_layer = ps[ps['Layer'] == layer]
+        real_significant = 0
+        for metric in available_metrics:
+            euphemistic = real_layer.loc[real_layer['Condition'] == 'Euphemistic', metric]
+            non_euphemistic = real_layer.loc[real_layer['Condition'] == 'Non-Euphemistic', metric]
+            p = mannwhitneyu(euphemistic, non_euphemistic, alternative='two-sided').pvalue
+            real_significant += p * n_tests < 0.05
+        real_layer_significant[layer] = int(real_significant)
 
-    return {
+    result = {
         'n_permutations': n_permutations,
         'n_metrics': len(available_metrics),
         'n_tests_per_permutation': n_tests,
         'significant_tests_per_permutation': significant_counts,
         'mean_significant_tests': float(np.mean(significant_counts)),
         'max_significant_tests': max(significant_counts),
-        'layer11_significant_tests_per_permutation': layer11_counts,
-        'permutations_with_layer11_significance': sum(count > 0 for count in layer11_counts),
-        'real_layer11_significant_metrics': int(real_significant),
     }
+    for layer, counts in layer_counts.items():
+        result[f'layer{layer}_significant_tests_per_permutation'] = counts
+        result[f'permutations_with_layer{layer}_significance'] = sum(count > 0 for count in counts)
+        result[f'real_layer{layer}_significant_metrics'] = real_layer_significant[layer]
+    return result
 
 
 def compact_evaluation(data):
@@ -309,6 +398,7 @@ def collect_run(run_dir, manifest_index):
             )
         correlations = checks.get('context_length_correlations')
         context_adjustment = checks.get('context_length_adjustment')
+        joint_length_adjustment = checks.get('pet_context_length_adjustment')
         sample_lengths = pd.DataFrame(checks['lengths']) if checks.get('lengths') else pd.DataFrame()
         if not sample_lengths.empty and 'context_len' not in sample_lengths:
             sink_count = sample_lengths.get('sink_count', 2)
@@ -322,6 +412,9 @@ def collect_run(run_dir, manifest_index):
                 collapse_profile(profile_data['real_pet']), sample_lengths,
             )
             context_adjustment = context_length_adjusted_attention(
+                collapse_profile(profile_data['real_pet']), sample_lengths,
+            )
+            joint_length_adjustment = pet_context_length_adjusted_attention(
                 collapse_profile(profile_data['real_pet']), sample_lengths,
             )
         if context_adjustment is not None and 'class_effect_tests' not in context_adjustment:
@@ -345,12 +438,17 @@ def collect_run(run_dir, manifest_index):
                 key: control_effects(profile_data[key])
                 for key in PROFILE_KEYS if key in profile_data
             },
-            'layer11_correctness_effects': misclassification_effects(
+            'paired_pet_random_contrasts': paired_pet_random_contrasts(
+                profile_data.get('real_pet', []),
+                profile_data.get('random_span', []),
+            ),
+            'layer10_11_correctness_effects': misclassification_effects(
                 profile_data.get('real_pet', [])),
             'label_shuffle': label_shuffle_summary(
                 profile_data.get('real_pet', []), checks.get('n_permutations'), checks.get('seed')),
             'context_length_correlations': correlations,
             'context_length_adjustment': context_adjustment,
+            'pet_context_length_adjustment': joint_length_adjustment,
             'raw_profile_rows_omitted': {
                 key: len(value) for key, value in profile_data.items()
             },
@@ -388,13 +486,15 @@ def build_comparisons(runs):
             'performance': {},
             'layer_effects': [],
             'attention_controls': [],
+            'paired_pet_random_contrasts': [],
             'prediction_flip_rate': mean_range([
                 run.get('sanity_checks', {}).get('prediction_flip_rate') for run in members
             ]),
             'label_shuffle': [],
-            'layer11_correctness': [],
+            'layer10_11_correctness': [],
             'context_length_correlations': [],
             'context_length_adjustment': [],
+            'pet_context_length_adjustment': [],
         }
 
         for field in ('accuracy', 'macro_f1', 'weighted_f1'):
@@ -438,9 +538,11 @@ def build_comparisons(runs):
             group['layer_effects'].append(row)
 
         control_map = {}
+        paired_span_map = {}
         correctness_map = {}
         correlation_map = {}
         adjustment_map = {}
+        joint_adjustment_map = {}
         for run in members:
             sanity = run.get('sanity_checks', {})
             shuffle = sanity.get('label_shuffle')
@@ -449,6 +551,8 @@ def build_comparisons(runs):
                     'run': run['run_name'],
                     'mean_significant_tests': shuffle['mean_significant_tests'],
                     'max_significant_tests': shuffle['max_significant_tests'],
+                    'permutations_with_layer10_significance': shuffle['permutations_with_layer10_significance'],
+                    'real_layer10_significant_metrics': shuffle['real_layer10_significant_metrics'],
                     'permutations_with_layer11_significance': shuffle['permutations_with_layer11_significance'],
                     'n_permutations': shuffle['n_permutations'],
                     'n_metrics': shuffle.get('n_metrics'),
@@ -461,11 +565,23 @@ def build_comparisons(runs):
                             'run': run['run_name'], 'd': result.get('cohens_d'),
                             'p_bonferroni': result.get('p_bonferroni'),
                         })
-            for metric, outcomes in sanity.get('layer11_correctness_effects', {}).items():
-                for outcome, result in outcomes.items():
-                    correctness_map.setdefault((metric, outcome), []).append({
-                        'run': run['run_name'], 'd': result.get('cohens_d'),
-                    })
+            for result in sanity.get('paired_pet_random_contrasts', []):
+                key = (result['layer'], result['metric'])
+                paired_span_map.setdefault(key, []).append({
+                    'run': run['run_name'],
+                    'd': result.get('cohens_d'),
+                    'p_bonferroni': result.get('p_bonferroni'),
+                    'mean_difference_euphemistic': result.get(
+                        'mean_difference_euphemistic'),
+                    'mean_difference_non_euphemistic': result.get(
+                        'mean_difference_non_euphemistic'),
+                })
+            for layer, metrics in sanity.get('layer10_11_correctness_effects', {}).items():
+                for metric, outcomes in metrics.items():
+                    for outcome, result in outcomes.items():
+                        correctness_map.setdefault((int(layer), metric, outcome), []).append({
+                            'run': run['run_name'], 'd': result.get('cohens_d'),
+                        })
             correlation_data = sanity.get('context_length_correlations') or {}
             for result in correlation_data.get('results', []):
                 key = (result['condition'], result['layer'], result['metric'])
@@ -499,6 +615,39 @@ def build_comparisons(runs):
                         'adjusted_d': cohens_d(adj_e, adj_n),
                         'class_effect_test': adjusted_tests.get(key),
                     })
+            joint_data = sanity.get('pet_context_length_adjustment') or {}
+            joint_points = joint_data.get('data_points', [])
+            joint_tests = {
+                (test['layer'], test['metric']): test
+                for test in joint_data.get('class_effect_tests', [])
+            }
+            joint_results = {
+                (result['layer'], result['metric']): result
+                for result in joint_data.get('results', [])
+                if result['condition'] == 'Euphemistic'
+            }
+            for layer in sorted({point['layer'] for point in joint_points}):
+                for metric in LENGTH_ADJUSTED_METRICS:
+                    metric_points = [point for point in joint_points
+                                     if point['layer'] == layer and point['metric'] == metric]
+                    raw_e = [p['raw_value'] for p in metric_points
+                             if p['condition'] == 'Euphemistic' and p['raw_value'] is not None]
+                    raw_n = [p['raw_value'] for p in metric_points
+                             if p['condition'] == 'Non-Euphemistic' and p['raw_value'] is not None]
+                    adj_e = [p['length_adjusted_value'] for p in metric_points
+                             if p['condition'] == 'Euphemistic' and p['length_adjusted_value'] is not None]
+                    adj_n = [p['length_adjusted_value'] for p in metric_points
+                             if p['condition'] == 'Non-Euphemistic' and p['length_adjusted_value'] is not None]
+                    key = (layer, metric)
+                    slopes = joint_results.get(key, {})
+                    joint_adjustment_map.setdefault(key, []).append({
+                        'run': run['run_name'],
+                        'raw_d': cohens_d(raw_e, raw_n),
+                        'adjusted_d': cohens_d(adj_e, adj_n),
+                        'class_effect_test': joint_tests.get(key),
+                        'pet_length_slope': slopes.get('pet_length_slope'),
+                        'context_length_slope': slopes.get('context_length_slope'),
+                    })
 
         for (profile_name, layer, metric), values in sorted(control_map.items()):
             ds = [v['d'] for v in values if v['d'] is not None]
@@ -510,9 +659,29 @@ def build_comparisons(runs):
                     for v in values
                 ),
             })
-        for (metric, outcome), values in sorted(correctness_map.items()):
-            group['layer11_correctness'].append({
-                'metric': metric, 'outcome': outcome,
+        for (layer, metric), values in sorted(paired_span_map.items()):
+            ds = [value['d'] for value in values if value['d'] is not None]
+            group['paired_pet_random_contrasts'].append({
+                'layer': layer,
+                'metric': metric,
+                **mean_range(ds),
+                'n_runs': len(values),
+                'positive_direction_runs': sum(d > 0 for d in ds),
+                'negative_direction_runs': sum(d < 0 for d in ds),
+                'bonferroni_significant_runs': sum(
+                    value['p_bonferroni'] is not None
+                    and value['p_bonferroni'] < 0.05 for value in values
+                ),
+                'mean_difference_euphemistic': mean_range([
+                    value['mean_difference_euphemistic'] for value in values
+                ]),
+                'mean_difference_non_euphemistic': mean_range([
+                    value['mean_difference_non_euphemistic'] for value in values
+                ]),
+            })
+        for (layer, metric, outcome), values in sorted(correctness_map.items()):
+            group['layer10_11_correctness'].append({
+                'layer': layer, 'metric': metric, 'outcome': outcome,
                 **mean_range([v['d'] for v in values]), 'n_runs': len(values),
             })
         for (condition, layer, metric), values in sorted(correlation_map.items()):
@@ -537,6 +706,30 @@ def build_comparisons(runs):
                 'layer': layer, 'metric': metric, 'n_runs': len(values),
                 'raw_d': mean_range(raw_ds),
                 'length_adjusted_d': mean_range(adjusted_ds),
+                'adjusted_mean_difference': mean_range([
+                    test['adjusted_mean_difference'] for test in tests
+                ]),
+                'bonferroni_significant_runs': sum(
+                    test['p_bonferroni'] < 0.05 for test in tests
+                ),
+                'n_tested_runs': len(tests),
+            })
+        for (layer, metric), values in sorted(joint_adjustment_map.items()):
+            raw_ds = [value['raw_d'] for value in values if value['raw_d'] is not None]
+            adjusted_ds = [value['adjusted_d'] for value in values
+                           if value['adjusted_d'] is not None]
+            tests = [value['class_effect_test'] for value in values
+                     if value['class_effect_test'] is not None]
+            group['pet_context_length_adjustment'].append({
+                'layer': layer, 'metric': metric, 'n_runs': len(values),
+                'raw_d': mean_range(raw_ds),
+                'length_adjusted_d': mean_range(adjusted_ds),
+                'pet_length_slope': mean_range([
+                    value['pet_length_slope'] for value in values
+                ]),
+                'context_length_slope': mean_range([
+                    value['context_length_slope'] for value in values
+                ]),
                 'adjusted_mean_difference': mean_range([
                     test['adjusted_mean_difference'] for test in tests
                 ]),
@@ -725,13 +918,16 @@ def render_plaintext(runs, comparisons, recurrence):
             rows.append([
                 shuffle['run'], f"{shuffle['mean_significant_tests']:.2f}",
                 shuffle['max_significant_tests'],
+                    f"{shuffle['permutations_with_layer10_significance']}/{shuffle['n_permutations']}",
+                    f"{shuffle['real_layer10_significant_metrics']}/{shuffle.get('n_metrics', 6)}",
                 f"{shuffle['permutations_with_layer11_significance']}/{shuffle['n_permutations']}",
                 f"{shuffle['real_layer11_significant_metrics']}/{shuffle.get('n_metrics', 6)}",
             ])
         lines.extend(render_table(
             ['Label-shuffle control', 'Mean significant tests / permutation', 'Max',
+             'Layer-10-hit permutations', 'Real layer-10 metrics significant',
              'Layer-11-hit permutations', 'Real layer-11 metrics significant'],
-            rows, right_align=(1, 2, 3, 4),
+            rows, right_align=(1, 2, 3, 4, 5, 6),
         ))
         lines += [
             '',
@@ -752,19 +948,51 @@ def render_plaintext(runs, comparisons, recurrence):
         lines += [
             '',
         ]
-        correct = {r['metric']: r for r in group['layer11_correctness'] if r['outcome'] == 'correct'}
-        incorrect = {r['metric']: r for r in group['layer11_correctness'] if r['outcome'] == 'misclassified'}
-        rows = []
-        for metric in ('Inward (Context → PET)', 'Internal (PET → PET)',
-                       'Sink (PET → Sink)', 'Sink (Sink → PET)'):
-            if metric in correct or metric in incorrect:
+        if group['paired_pet_random_contrasts']:
+            lines += [
+                'PAIRED PET-MINUS-RANDOM-SPAN CLASS CONTRASTS',
+                'Per-example difference is PET attention minus matched random-span attention.',
+                'Cohen\'s d compares these differences between classes; significance uses 84-test Bonferroni correction per run.',
+                '',
+            ]
+            rows = []
+            for item in group['paired_pet_random_contrasts']:
+                if item['layer'] not in (10, 11) or item['metric'] not in (
+                        'Inward (Context → PET)', 'Internal (PET → PET)'):
+                    continue
                 rows.append([
-                    metric, fmt_range(correct.get(metric, {}), signed=True),
-                    fmt_range(incorrect.get(metric, {}), signed=True),
+                    item['layer'], item['metric'],
+                    fmt_range(item, signed=True),
+                    f"{item['positive_direction_runs']}/{item['n_runs']}",
+                    f"{item['bonferroni_significant_runs']}/{item['n_runs']}",
                 ])
+            lines.extend(render_table(
+                ['Layer', 'Metric', 'Paired-contrast d mean [range]',
+                 'Positive runs', 'Bonferroni-significant runs'],
+                rows, right_align=(0, 2, 3, 4),
+            ))
+            lines += ['', '']
+        correct = {
+            (r['layer'], r['metric']): r for r in group['layer10_11_correctness']
+            if r['outcome'] == 'correct'
+        }
+        incorrect = {
+            (r['layer'], r['metric']): r for r in group['layer10_11_correctness']
+            if r['outcome'] == 'misclassified'
+        }
+        rows = []
+        for layer in (10, 11):
+            for metric in ('Inward (Context → PET)', 'Internal (PET → PET)',
+                           'Sink (PET → Sink)', 'Sink (Sink → PET)'):
+                key = (layer, metric)
+                if key in correct or key in incorrect:
+                    rows.append([
+                        layer, metric, fmt_range(correct.get(key, {}), signed=True),
+                        fmt_range(incorrect.get(key, {}), signed=True),
+                    ])
         lines.extend(render_table(
-            ['Metric', 'Correctly classified d', 'Misclassified d'], rows,
-            right_align=(1, 2),
+            ['Layer', 'Metric', 'Correctly classified d', 'Misclassified d'], rows,
+            right_align=(0, 2, 3),
         ))
         if group['context_length_correlations']:
             lines += [
@@ -799,6 +1027,35 @@ def render_plaintext(runs, comparisons, recurrence):
             ]
             rows = []
             for row in group['context_length_adjustment']:
+                raw = row['raw_d']
+                adjusted = row['length_adjusted_d']
+                delta = None
+                if raw.get('mean') is not None and adjusted.get('mean') is not None:
+                    delta = adjusted['mean'] - raw['mean']
+                rows.append([
+                    row['layer'], row['metric'], fmt_range(raw, digits=3, signed=True),
+                    fmt_range(adjusted, digits=3, signed=True),
+                    '-' if delta is None else f'{delta:+.3f}',
+                    fmt_range(row['adjusted_mean_difference'], digits=4, signed=True),
+                    f"{row['bonferroni_significant_runs']}/{row['n_tested_runs']}",
+                ])
+            lines.extend(render_table(
+                ['Layer', 'Metric', 'Raw d mean [range]', 'Adjusted d mean [range]',
+                 'Δ mean d', 'Adjusted mean diff.', 'Adjusted sig.'], rows,
+                right_align=(0, 2, 3, 4, 5, 6),
+            ))
+        if group['pet_context_length_adjustment']:
+            lines += [
+                '',
+                'JOINT PET- AND CONTEXT-LENGTH-ADJUSTED ATTENTION EFFECTS',
+                'Cohen\'s d before and after adjustment to each run\'s mean PET and context lengths.',
+                'Significance tests the class coefficient in attention ~ class + PET length + context length using HC3 robust OLS.',
+                f"Per-run Bonferroni correction uses the existing {FULL_ATTENTION_TEST_FAMILY_SIZE}-test family.",
+                'Positive d and adjusted mean difference indicate greater Euphemistic attention.',
+                '',
+            ]
+            rows = []
+            for row in group['pet_context_length_adjustment']:
                 raw = row['raw_d']
                 adjusted = row['length_adjusted_d']
                 delta = None

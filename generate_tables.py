@@ -1,4 +1,4 @@
-"""Generate paper-ready LaTeX tables from aggregate_stats.py output.
+"""Generate paper-ready main and appendix tables from aggregate statistics.
 
 This script only reads the saved aggregate JSON; it does not run model inference
 or recompute statistical tests. Generated LaTeX is written to a separate file
@@ -45,7 +45,7 @@ ATTENTION_EFFECT_SPLIT_NAMES = {
     'lrec': 'PET-disjoint',
 }
 ATTENTION_MASKING_COLUMN_HEADERS = (
-    'Layer', 'Metric', r'Raw $d$', r'Adjusted $d$',
+    'Layer', 'Metric', r'Raw $d$', r'Joint-adjusted $d$',
     r'Masked $d$ (sig.)', r'Random-span $d$ (sig.)',
 )
 TABLE_METRICS = ('inward', 'internal')
@@ -58,8 +58,8 @@ METRIC_LABELS = {
     'Inward (Context → PET)': r'Inward ($C\to P$)',
     'Internal (PET → PET)': r'Internal ($P\to P$)',
     'Outward (PET → Context)': r'Outward ($P\to C$)',
-    'Sink (PET → Sink)': r'PET-to-sink ($P\to S$)',
-    'Sink (Sink → PET)': r'Sink-to-PET ($S\to P$)',
+    'Sink (PET → Sink)': r'To-Sink ($P\to S$)',
+    'Sink (Sink → PET)': r'From-Sink ($S\to P$)',
     'Entropy': 'Entropy',
     'Distance': 'Distance',
 }
@@ -257,7 +257,7 @@ def attention_masking_table(groups, metrics, layers, split_names):
             rows.append('        \\midrule')
         adjusted_index = {
             (row['layer'], row['metric']): row
-            for row in group.get('context_length_adjustment', [])
+            for row in group.get('pet_context_length_adjustment', [])
         }
         controls = {
             (row['profile'], row['layer'], row['metric']): row
@@ -295,8 +295,205 @@ def attention_masking_table(groups, metrics, layers, split_names):
 {body}
         \bottomrule
     \end{{tabular}}
-    \caption{{Class effect sizes ({CLASS_CONTRAST_LABEL}) for the primary PET attention flows in layers 10--11. Effect-size ranges show observed run-to-run variation within each split. Raw and adjusted effects are Bonferroni-significant in every run for all listed layer-metric pairs. Masked and random-span show the number of runs with a Bonferroni-significant class contrast (84 metric-by-layer tests per run).}}
+    \caption{{Class effect sizes ({CLASS_CONTRAST_LABEL}) for the primary PET attention flows in layers 10--11. Effect-size ranges show observed run-to-run variation within each split. Joint-adjusted values account for PET and context length. Raw and jointly adjusted effects are Bonferroni-significant in every run for all listed layer-metric pairs. Masked and random-span show the number of runs with a Bonferroni-significant class contrast (84 metric-by-layer tests per run).}}
     \label{{tab:attn-effects}}
+\end{{table*}}'''
+
+
+def label_shuffle_table(groups):
+    rows = []
+    for group in groups:
+        split_name = fmt_split(group['split_id'], ATTENTION_EFFECT_SPLIT_NAMES)
+        for shuffle in group.get('label_shuffle', []):
+            run_name = shuffle.get('run', '')
+            seed = run_name.split('_train-', 1)[-1].split('_freeze-', 1)[0]
+            rows.append(
+                f"        {split_name} & {seed} & "
+                f"{shuffle['mean_significant_tests']:.2f} & "
+                f"{shuffle['max_significant_tests']} & "
+                f"{shuffle['permutations_with_layer10_significance']}/"
+                f"{shuffle['n_permutations']} & "
+                f"{shuffle['real_layer10_significant_metrics']}/"
+                f"{shuffle.get('n_metrics', 7)} & "
+                f"{shuffle['permutations_with_layer11_significance']}/"
+                f"{shuffle['n_permutations']} & "
+                f"{shuffle['real_layer11_significant_metrics']}/"
+                f"{shuffle.get('n_metrics', 7)} \\\\")
+    body = '\n'.join(rows)
+    return rf'''\begin{{table*}}[t]
+    \centering\small
+    \setlength{{\tabcolsep}}{{4pt}}
+    \begin{{tabular}}{{@{{}}llrrrrrr@{{}}}}
+        \toprule
+        Split & Seed & Mean / shuffle & Max / shuffle & L10 shuffle hits & L10 real sig. & L11 shuffle hits & L11 real sig. \\
+        \midrule
+{body}
+        \bottomrule
+    \end{{tabular}}
+    \caption{{Label-shuffle results over the full 84-test family (seven metrics across 12 layers), with layer-specific permutation hits and real-data significant metric counts.}}
+    \label{{tab:shuffle}}
+\end{{table*}}'''
+
+
+def appendix_control_table(groups, profile, caption, label, layers=TABLE_LAYERS):
+    rows = []
+    flip_rates = []
+    for group in groups:
+        split_name = fmt_split(group['split_id'], ATTENTION_EFFECT_SPLIT_NAMES)
+        if profile == 'masked_pet':
+            flip_rate = group.get('prediction_flip_rate') or {}
+            if flip_rate.get('mean') is not None:
+                flip_rates.append(
+                    f"{split_name}: {100 * flip_rate['mean']:.1f}\\% "
+                    f"[{100 * flip_rate['min']:.1f}, {100 * flip_rate['max']:.1f}]"
+                )
+        controls = {
+            (row['layer'], row['metric']): row
+            for row in group.get('attention_controls', [])
+            if row['profile'] == profile
+        }
+        for layer in layers:
+            for metric in FINETUNING_DIFF_METRICS:
+                metric_name = metric_names_for_label(metric)
+                result = controls.get((layer, metric_name))
+                if not result:
+                    continue
+                rows.append(
+                    f"        {split_name} & {layer} & {fmt_metric(metric_name)} & "
+                    f"{fmt_signed_range(result)} & "
+                    f"{result['bonferroni_significant_runs']}/{result['n_runs']} \\\\")
+    body = '\n'.join(rows)
+    if flip_rates:
+        caption += ' PET-mask prediction-flip rates: ' + '; '.join(flip_rates) + '.'
+    return rf'''\begin{{table*}}[t]
+    \centering\small
+    \setlength{{\tabcolsep}}{{5pt}}
+    \begin{{tabular}}{{@{{}}lllrr@{{}}}}
+        \toprule
+        Split & Layer & Metric & Cohen's $d$ mean [range] & Significant runs \\
+        \midrule
+{body}
+        \bottomrule
+    \end{{tabular}}
+    \caption{{{caption}}}
+    \label{{{label}}}
+\end{{table*}}'''
+
+
+def metric_names_for_label(key):
+    return {
+        'inward': 'Inward (Context → PET)',
+        'internal': 'Internal (PET → PET)',
+        'outward': 'Outward (PET → Context)',
+        'pet-sink': 'Sink (PET → Sink)',
+        'sink-pet': 'Sink (Sink → PET)',
+        'entropy': 'Entropy',
+        'distance': 'Distance',
+    }[key]
+
+
+def paired_pet_random_table(groups, layers=TABLE_LAYERS):
+    rows = []
+    for group in groups:
+        split_name = fmt_split(group['split_id'], ATTENTION_EFFECT_SPLIT_NAMES)
+        effects = {
+            (item['layer'], item['metric']): item
+            for item in group.get('paired_pet_random_contrasts', [])
+        }
+        for layer in layers:
+            for metric in (metric_names_for_label('inward'),
+                           metric_names_for_label('internal')):
+                item = effects.get((layer, metric))
+                if not item:
+                    continue
+                rows.append(
+                    f"        {split_name} & {layer} & {fmt_metric(metric)} & "
+                    f"{fmt_signed_range(item)} & "
+                    f"{item['bonferroni_significant_runs']}/{item['n_runs']} \\\\")
+    body = '\n'.join(rows)
+    return rf'''\begin{{table*}}[t]
+    \centering\small
+    \setlength{{\tabcolsep}}{{5pt}}
+    \begin{{tabular}}{{@{{}}lllrr@{{}}}}
+        \toprule
+        Split & Layer & Metric & Paired-contrast $d$ mean [range] & Significant runs \\
+        \midrule
+{body}
+        \bottomrule
+    \end{{tabular}}
+    \caption{{For each example, the paired contrast is the real-PET attention value minus the length-matched random-span value. Cohen's $d$ measures the Euphemistic--Non-Euphemistic difference in these per-example contrasts; ranges show run-to-run variation. Significance counts use Mann--Whitney tests with Bonferroni correction over 84 metric-by-layer tests per run.}}
+    \label{{tab:pet-rand-diff}}
+\end{{table*}}'''
+
+
+def joint_length_adjustment_table(groups, layers=TABLE_LAYERS):
+    rows = []
+    for group in groups:
+        split_name = fmt_split(group['split_id'], ATTENTION_EFFECT_SPLIT_NAMES)
+        adjustments = {
+            (row['layer'], row['metric']): row
+            for row in group.get('pet_context_length_adjustment', [])
+        }
+        for layer in layers:
+            for metric_key in ('inward', 'internal', 'outward', 'sink-pet'):
+                metric = metric_names_for_label(metric_key)
+                result = adjustments.get((layer, metric))
+                if not result:
+                    continue
+                tested_runs = result.get('n_tested_runs', result.get('n_runs', 0))
+                rows.append(
+                    f"        {split_name} & {layer} & {fmt_metric(metric)} & "
+                    f"{fmt_signed_range(result.get('raw_d'))} $\\to$ "
+                    f"{fmt_signed_range(result.get('length_adjusted_d'))} & "
+                    f"{result.get('bonferroni_significant_runs', 0)}/{tested_runs} \\\\")
+    body = '\n'.join(rows)
+    return rf'''\begin{{table*}}[t]
+    \centering\small
+    \setlength{{\tabcolsep}}{{4pt}}
+    \begin{{tabular}}{{@{{}}lllrr@{{}}}}
+        \toprule
+        Split & Layer & Metric & Raw $d$ $\to$ adjusted $d$ [range] & Adjusted significant runs \\
+        \midrule
+{body}
+        \bottomrule
+    \end{{tabular}}
+    \caption{{Joint PET- and context-length adjustment for the four context-related metrics in layers 10--11. Effects summarize four runs within each split. Significance is the class coefficient from HC3 robust regression on class, PET length, and context length, with Bonferroni correction over 84 tests per run.}}
+    \label{{tab:length-joint}}
+\end{{table*}}'''
+
+
+def correctness_table(groups, layers=TABLE_LAYERS):
+    selected_metrics = ('inward', 'internal', 'pet-sink', 'sink-pet')
+    rows = []
+    for group in groups:
+        split_name = fmt_split(group['split_id'], ATTENTION_EFFECT_SPLIT_NAMES)
+        effects = {
+            (row['layer'], row['metric'], row['outcome']): row
+            for row in group.get('layer10_11_correctness', [])
+        }
+        for layer in layers:
+            for metric_key in selected_metrics:
+                metric = metric_names_for_label(metric_key)
+                correct = effects.get((layer, metric, 'correct'))
+                misclassified = effects.get((layer, metric, 'misclassified'))
+                if not correct and not misclassified:
+                    continue
+                rows.append(
+                    f"        {split_name} & {layer} & {fmt_metric(metric)} & "
+                    f"{fmt_signed_range(correct)} & {fmt_signed_range(misclassified)} \\\\")
+    body = '\n'.join(rows)
+    return rf'''\begin{{table*}}[t]
+    \centering\small
+    \setlength{{\tabcolsep}}{{5pt}}
+    \begin{{tabular}}{{@{{}}lllrr@{{}}}}
+        \toprule
+        Split & Layer & Metric & Correctly classified $d$ [range] & Misclassified $d$ [range] \\
+        \midrule
+{body}
+        \bottomrule
+    \end{{tabular}}
+    \caption{{Classification-outcome stratification for selected late-layer metrics. Effect sizes are descriptive euphemistic--non-euphemistic contrasts within each correctness stratum and summarize four runs per split.}}
+    \label{{tab:misclass}}
 \end{{table*}}'''
 
 
@@ -388,6 +585,21 @@ def main():
             full_finetune_groups, selected_metrics, TABLE_LAYERS,
             ATTENTION_EFFECT_SPLIT_NAMES,
         ),
+        '% Appendix robustness-control tables',
+        label_shuffle_table(full_finetune_groups),
+        appendix_control_table(
+            full_finetune_groups, 'masked_pet',
+            'PET-token masking results by split and layer. Each entry is the mean [minimum, maximum] across training runs; significance counts use the per-run Bonferroni correction over 84 tests.',
+            'tab:masking',
+        ),
+        appendix_control_table(
+            full_finetune_groups, 'random_span',
+            'Length-matched random-span results by split and layer. Each entry is the mean [minimum, maximum] across training runs; significance counts use the per-run Bonferroni correction over 84 tests.',
+            'tab:randspan',
+        ),
+        paired_pet_random_table(full_finetune_groups),
+        joint_length_adjustment_table(full_finetune_groups),
+        correctness_table(full_finetune_groups),
         finetuning_difference_table(
             full_finetune_groups,
             [metric_names[name] for name in FINETUNING_DIFF_METRICS], TABLE_LAYERS,

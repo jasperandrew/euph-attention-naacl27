@@ -1,4 +1,5 @@
-# euph-attention-v2
+# Positional PETs: Mapping Attention Flow in Finetuned Euphemism Detection
+Jasper Andrew (andrewj2@montclair.edu), Anna Feldman (feldmana@montclair.edu), Jing Peng (pengj@montclair.edu), Libby Barak (barakl@montclair.edu)
 
 ## Replication Instructions
 
